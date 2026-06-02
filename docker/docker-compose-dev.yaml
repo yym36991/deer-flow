@@ -161,6 +161,13 @@ services:
         read_only: true
         bind:
           create_host_path: true
+      # WeChat iLink bot token from cc-weixin QR login (~/.cc-weixin/token.json)
+      - type: bind
+        source: ${HOME:?HOME must be set}/.cc-weixin
+        target: /root/.cc-weixin
+        read_only: true
+        bind:
+          create_host_path: true
     working_dir: /app
     environment:
       - CI=true

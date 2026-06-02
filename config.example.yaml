@@ -1078,6 +1078,8 @@ run_events:
 #     enabled: false
 #     bot_token: $WECHAT_BOT_TOKEN
 #     ilink_bot_id: $WECHAT_ILINK_BOT_ID
+#     # Or reuse cc-weixin QR login output (~/.cc-weixin/token.json):
+#     # auth_token_file: backend/.deer-flow/wechat/token.json
 #     # Optional: allow first-time QR bootstrap when bot_token is absent
 #     qrcode_login_enabled: true
 #     # Optional: sent as iLink-App-Id header when provided

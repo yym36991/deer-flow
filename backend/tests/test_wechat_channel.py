@@ -1189,6 +1189,32 @@ def test_state_cursor_is_loaded_from_disk(tmp_path: Path):
     assert channel._get_updates_buf == "cursor-123"
 
 
+def test_auth_token_file_loads_cc_weixin_format(tmp_path: Path):
+    from app.channels.wechat import WechatChannel
+
+    token_path = tmp_path / "token.json"
+    token_path.write_text(
+        json.dumps(
+            {
+                "token": "cc-token@im.bot:secret",
+                "accountId": "abc123@im.bot",
+                "baseUrl": "https://ilinkai.weixin.qq.com",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    channel = WechatChannel(
+        bus=MessageBus(),
+        config={"auth_token_file": str(token_path), "state_dir": str(tmp_path / "state")},
+    )
+
+    assert channel._bot_token == "cc-token@im.bot:secret"
+    assert channel._ilink_bot_id == "abc123@im.bot"
+    assert channel._base_url == "https://ilinkai.weixin.qq.com"
+
+
 def test_auth_state_is_loaded_from_disk(tmp_path: Path):
     from app.channels.wechat import WechatChannel
 

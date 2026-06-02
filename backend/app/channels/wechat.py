@@ -136,6 +136,9 @@ class WechatChannel(Channel):
         - ``allowed_users``: (optional) List of allowed iLink user IDs. Empty = allow all.
         - ``polling_timeout``: (optional) Long-poll timeout in seconds. Default: 35.
         - ``state_dir``: (optional) Directory used to persist the long-poll cursor.
+        - ``auth_token_file``: (optional) Path to a JSON credential file. Supports
+          DeerFlow ``wechat-auth.json`` (``bot_token``, ``ilink_bot_id``) and
+          cc-weixin / openclaw-weixin ``token.json`` (``token``, ``accountId``, ``baseUrl``).
     """
 
     DEFAULT_BASE_URL = "https://ilinkai.weixin.qq.com"
@@ -253,6 +256,9 @@ class WechatChannel(Channel):
         self._cursor_path = self._state_dir / "wechat-getupdates.json" if self._state_dir else None
         self._auth_path = self._state_dir / "wechat-auth.json" if self._state_dir else None
         self._load_state()
+        self._load_auth_token_file(config.get("auth_token_file"))
+        if self._bot_token and self._auth_path:
+            self._save_auth_state(status="ready")
 
     async def start(self) -> None:
         if self._running:
@@ -1267,6 +1273,39 @@ class WechatChannel(Channel):
         except OSError:
             logger.warning("[WeChat] failed to persist cursor state to %s", self._cursor_path)
 
+    def _load_auth_token_file(self, raw_path: Any) -> None:
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            return
+        path = self._resolve_config_path(raw_path.strip())
+        if not path.is_file():
+            logger.warning("[WeChat] auth_token_file not found: %s", path)
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("[WeChat] failed to read auth_token_file %s: %s", path, exc)
+            return
+        if not isinstance(data, dict):
+            return
+
+        if not self._bot_token:
+            for key in ("bot_token", "token"):
+                token = data.get(key)
+                if isinstance(token, str) and token.strip():
+                    self._bot_token = token.strip()
+                    break
+
+        if not self._ilink_bot_id:
+            for key in ("ilink_bot_id", "accountId"):
+                ilink_bot_id = data.get(key)
+                if isinstance(ilink_bot_id, str) and ilink_bot_id.strip():
+                    self._ilink_bot_id = ilink_bot_id.strip()
+                    break
+
+        base_url = data.get("base_url") or data.get("baseUrl")
+        if isinstance(base_url, str) and base_url.strip():
+            self._base_url = base_url.strip().rstrip("/")
+
     def _load_auth_state(self) -> None:
         if not self._auth_path or not self._auth_path.exists():
             return
@@ -1343,10 +1382,21 @@ class WechatChannel(Channel):
         return "\n".join(parts)
 
     @staticmethod
+    def _resolve_config_path(raw_path: str) -> Path:
+        if raw_path.startswith("~"):
+            return Path(raw_path).expanduser().resolve()
+        path = Path(raw_path)
+        if path.is_absolute():
+            return path.resolve()
+        from deerflow.config.runtime_paths import resolve_path
+
+        return resolve_path(raw_path)
+
+    @staticmethod
     def _resolve_state_dir(raw_state_dir: Any) -> Path | None:
         if not isinstance(raw_state_dir, str) or not raw_state_dir.strip():
             return None
-        return Path(raw_state_dir).expanduser()
+        return WechatChannel._resolve_config_path(raw_state_dir.strip())
 
     @staticmethod
     def _coerce_float(value: Any, default: float) -> float:

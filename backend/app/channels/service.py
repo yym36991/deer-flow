@@ -35,7 +35,7 @@ _CHANNEL_CREDENTIAL_KEYS: dict[str, list[str]] = {
     "slack": ["bot_token", "app_token"],
     "telegram": ["bot_token"],
     "wecom": ["bot_id", "bot_secret"],
-    "wechat": ["bot_token"],
+    "wechat": ["bot_token", "auth_token_file"],
 }
 
 _CHANNELS_LANGGRAPH_URL_ENV = "DEER_FLOW_CHANNELS_LANGGRAPH_URL"
