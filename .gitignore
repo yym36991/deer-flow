@@ -1,3 +1,6 @@
+# Cloud pack output
+dist/
+
 # DeerFlow docker image cache
 docker/.cache/
 # oh-my-claudecode state

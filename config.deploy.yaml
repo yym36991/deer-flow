@@ -1,0 +1,189 @@
+# DeerFlow 生产/沙箱部署配置（提交公司内部 Git）
+# cloud_pack.sh 打包使用本文件。本地开发请用 config.yaml。
+#
+
+database:
+  backend: postgres
+  postgres_url: postgresql://sandbox_test:JzPimDMqYKvZS3DW@test-sandbox01.pdb.58dns.org:28981/pdb58_meerflow_sandbox
+  pool_size: 5
+
+
+config_version: 11
+log_level: info
+
+token_usage:
+  enabled: true
+
+# 58 内网 ChatLing（Patched58ChatOpenAI 适配流式 message.* 非 OpenAI delta）
+models:
+  - name: chatling-turbo-0729
+    display_name: ChatLing-Turbo-0729
+    use: deerflow.models.patched_58corp:Patched58ChatOpenAI
+    model: chatling-turbo-0729
+    api_key: 07764114d68b475e892f85f39ee8a0ad
+    base_url: https://chatgpt.58corp.com/api/v1
+    request_timeout: 600.0
+    max_retries: 2
+    temperature: 0.4
+    top_p: 0.6
+    stream_usage: false
+
+  - name: chatling-plus
+    display_name: ChatLing-Plus
+    use: deerflow.models.patched_58corp:Patched58ChatOpenAI
+    model: chatling-plus
+    api_key: 07764114d68b475e892f85f39ee8a0ad
+    base_url: https://chatgpt.58corp.com/api/v1
+    request_timeout: 600.0
+    max_retries: 2
+    temperature: 0.4
+    top_p: 0.6
+    stream_usage: false
+
+tool_groups:
+  - name: web
+  - name: file:read
+  - name: file:write
+  - name: bash
+
+tools:
+  - name: web_search
+    group: web
+    use: deerflow.community.ddg_search.tools:web_search_tool
+    max_results: 5
+  - name: web_fetch
+    group: web
+    use: deerflow.community.jina_ai.tools:web_fetch_tool
+    timeout: 10
+  - name: image_search
+    group: web
+    use: deerflow.community.image_search.tools:image_search_tool
+    max_results: 5
+  - name: ls
+    group: file:read
+    use: deerflow.sandbox.tools:ls_tool
+  - name: read_file
+    group: file:read
+    use: deerflow.sandbox.tools:read_file_tool
+  - name: glob
+    group: file:read
+    use: deerflow.sandbox.tools:glob_tool
+    max_results: 200
+  - name: grep
+    group: file:read
+    use: deerflow.sandbox.tools:grep_tool
+    max_results: 100
+  - name: write_file
+    group: file:write
+    use: deerflow.sandbox.tools:write_file_tool
+  - name: str_replace
+    group: file:write
+    use: deerflow.sandbox.tools:str_replace_tool
+  - name: bash
+    group: bash
+    use: deerflow.sandbox.tools:bash_tool
+
+tool_search:
+  enabled: false
+
+tool_output:
+  enabled: true
+  externalize_min_chars: 12000
+  preview_head_chars: 2000
+  preview_tail_chars: 1000
+  fallback_max_chars: 30000
+  fallback_head_chars: 8000
+  fallback_tail_chars: 3000
+  storage_subdir: ".tool-results"
+  exempt_tools:
+    - read_file
+    - read_file_tool
+
+loop_detection:
+  enabled: true
+  warn_threshold: 3
+  hard_limit: 5
+  window_size: 20
+  max_tracked_threads: 100
+  tool_freq_warn: 30
+  tool_freq_hard_limit: 50
+
+safety_finish_reason:
+  enabled: true
+
+uploads:
+  max_files: 10
+  max_file_size: 52428800
+  max_total_size: 104857600
+  auto_convert_documents: false
+  pdf_converter: auto
+
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+  allow_host_bash: false
+  bash_output_max_chars: 20000
+  read_file_output_max_chars: 50000
+  ls_output_max_chars: 20000
+
+skills:
+  container_path: /mnt/skills
+
+title:
+  enabled: false
+  max_words: 6
+  max_chars: 60
+  model_name: null
+
+summarization:
+  enabled: true
+  model_name: null
+  trigger:
+    - type: tokens
+      value: 32000
+  keep:
+    type: messages
+    value: 10
+  trim_tokens_to_summarize: 15564
+  summary_prompt: null
+  preserve_recent_skill_count: 5
+  preserve_recent_skill_tokens: 25000
+  preserve_recent_skill_tokens_per_skill: 5000
+  skill_file_read_tool_names:
+    - read_file
+    - read
+    - view
+    - cat
+
+memory:
+  enabled: false
+  storage_path: memory.json
+  debounce_seconds: 30
+  model_name: null
+  max_facts: 100
+  fact_confidence_threshold: 0.7
+  injection_enabled: false
+  max_injection_tokens: 2000
+
+agents_api:
+  enabled: false
+
+skill_evolution:
+  enabled: false
+
+
+run_events:
+  backend: db
+  max_trace_content: 10240
+  track_token_usage: true
+
+channels:
+  langgraph_url: http://127.0.0.1:8001/api
+  gateway_url: http://127.0.0.1:8001
+  session:
+    assistant_id: lead_agent
+    config:
+      recursion_limit: 100
+    context:
+      thinking_enabled: false
+      is_plan_mode: false
+      subagent_enabled: false

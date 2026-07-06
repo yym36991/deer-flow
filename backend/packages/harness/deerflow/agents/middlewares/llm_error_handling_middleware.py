@@ -38,6 +38,15 @@ _BUSY_PATTERNS = (
     "服务繁忙",
     "稍后重试",
     "请稍后重试",
+    "code=510",
+    "code=508",
+    '"code":510',
+    '"code":508',
+    "code\":510",
+    "code\":508",
+    "api请求异常",
+    "qpm",
+    "限流",
 )
 _QUOTA_PATTERNS = (
     "insufficient_quota",
