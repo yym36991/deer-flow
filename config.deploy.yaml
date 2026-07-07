@@ -9,17 +9,27 @@ database:
 
 
 config_version: 11
-log_level: info
+# 改级别后无需重启：kill -USR1 <uvicorn-worker-pid>（即 kill -10 <pid>）
+log_level: debug
+
+# Gateway 滚动日志（wlog 语义：gateway_0.log 最新，满额后 _0→_1… 删最旧）
+file_logging:
+  enabled: true
+  base_name: gateway
+  max_files: 10
+  max_file_size_mb: 10
+  console: true
 
 token_usage:
   enabled: true
 
 # 58 内网 ChatLing（Patched58ChatOpenAI 适配流式 message.* 非 OpenAI delta）
+# 默认模型顺序与 meer-flow 一致：chatling-plus 优先（Agent+工具 bind 更稳；turbo 在部分请求形态下会返回空 content）
 models:
-  - name: chatling-turbo-0729
-    display_name: ChatLing-Turbo-0729
+  - name: chatling-plus
+    display_name: ChatLing-Plus
     use: deerflow.models.patched_58corp:Patched58ChatOpenAI
-    model: chatling-turbo-0729
+    model: chatling-plus
     api_key: 07764114d68b475e892f85f39ee8a0ad
     base_url: https://chatgpt.58corp.com/api/v1
     request_timeout: 600.0
@@ -28,10 +38,10 @@ models:
     top_p: 0.6
     stream_usage: false
 
-  - name: chatling-plus
-    display_name: ChatLing-Plus
+  - name: chatling-turbo-0729
+    display_name: ChatLing-Turbo-0729
     use: deerflow.models.patched_58corp:Patched58ChatOpenAI
-    model: chatling-plus
+    model: chatling-turbo-0729
     api_key: 07764114d68b475e892f85f39ee8a0ad
     base_url: https://chatgpt.58corp.com/api/v1
     request_timeout: 600.0
@@ -175,6 +185,32 @@ run_events:
   backend: db
   max_trace_content: 10240
   track_token_usage: true
+
+meishi:
+  enabled: true
+  app_id: bot202606028f4b01
+  secret: "90190000384881467701789327402982"
+  langgraph_url: http://127.0.0.1:8001/api
+  assistant_id: lead_agent
+  require_sign: true
+  require_token: false
+  pre_qa_prefix_user_oa: true
+  welcome_text: |
+    你好，我是 DeerFlow 云端助手，有什么可以帮你？
+    提示：复杂表格、多平台竞品调研建议拆成多次提问；同一对话内我会记住上文，最后一次可让我「汇总成表格」。
+  stream_ack_message: "已收到，正在检索与整理，请稍候…"
+  welcome_cmd_list:
+    - text: "今日工作总结"
+      cmd: "帮我总结今天的工作"
+      action_type: sendMsg
+    - text: "DeerFlow 能做什么"
+      cmd: "DeerFlow 有哪些能力？"
+      action_type: sendMsg
+  context:
+    model_name: chatling-plus
+    thinking_enabled: false
+    is_plan_mode: false
+    subagent_enabled: false
 
 channels:
   langgraph_url: http://127.0.0.1:8001/api

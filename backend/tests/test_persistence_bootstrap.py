@@ -47,7 +47,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0002_runs_token_usage"
+HEAD = "0003_channel_mappings"
 BASELINE = "0001_baseline"
 
 
@@ -93,6 +93,19 @@ async def _seed_legacy_without_column(engine) -> None:
 async def _seed_legacy_with_column(engine) -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+
+async def _seed_legacy_with_empty_alembic_version_table(engine) -> None:
+    """DeerFlow tables exist but ``alembic_version`` is an empty shell.
+
+    Models shared Postgres sandboxes where the bookkeeping table was created
+    (e.g. by a partial migration) but never stamped. Bootstrap must not take
+    the versioned branch and replay ``0001_baseline`` DDL.
+    """
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    async with engine.begin() as conn:
+        await conn.execute(sa.text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL, CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num))"))
 
 
 async def _seed_legacy_missing_channel_tables(engine) -> None:
@@ -205,6 +218,21 @@ async def test_legacy_missing_channel_tables_get_backfilled(tmp_path: Path) -> N
             "channel_oauth_states",
         }:
             assert required in tables, f"legacy backfill missed: {required}"
+        assert await _alembic_version(engine) == HEAD
+    finally:
+        await engine.dispose()
+
+
+@asyncio_test
+async def test_legacy_empty_alembic_version_table_uses_legacy_branch(tmp_path: Path) -> None:
+    engine = create_async_engine(_url(tmp_path))
+    try:
+        await _seed_legacy_with_empty_alembic_version_table(engine)
+        assert await _alembic_version(engine) is None
+        assert "runs" in await _table_names(engine)
+
+        await bootstrap_schema(engine, backend="sqlite")
+
         assert await _alembic_version(engine) == HEAD
     finally:
         await engine.dispose()

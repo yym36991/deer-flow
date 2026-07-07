@@ -146,8 +146,44 @@ def _58_message_to_delta(message: Mapping[str, Any] | None) -> dict[str, Any] | 
     return delta or None
 
 
+def _delta_needs_message_fallback(delta: Any) -> bool:
+    """Return True when LangChain would see an empty delta and should read ``message``."""
+    if delta is None:
+        return True
+    if isinstance(delta, Mapping) and not delta:
+        return True
+    if isinstance(delta, Mapping):
+        has_content = delta.get("content") not in (None, "")
+        has_tool_calls = bool(delta.get("tool_calls"))
+        has_reasoning = delta.get("reasoning_content") not in (None, "")
+        return not (has_content or has_tool_calls or has_reasoning)
+    return False
+
+
+def _merge_message_into_delta(choice: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Map 58 ``choices[].message`` into OpenAI ``delta`` when delta is missing/empty."""
+    msg_delta = _58_message_to_delta(choice.get("message"))  # type: ignore[arg-type]
+    if not msg_delta:
+        return choice.get("delta") if isinstance(choice.get("delta"), Mapping) else None
+    existing = choice.get("delta")
+    if isinstance(existing, Mapping) and existing:
+        merged = dict(existing)
+        for key, value in msg_delta.items():
+            if key not in merged or merged.get(key) in (None, "", []):
+                merged[key] = value
+        return merged
+    return msg_delta
+
+
 def normalize_58_stream_chunk(chunk: Mapping[str, Any]) -> dict[str, Any]:
-    """Rewrite 58 SSE JSON so LangChain can consume ``choices[].delta``."""
+    """Rewrite 58 SSE JSON so LangChain can consume ``choices[].delta``.
+
+    58 streaming chunks put incremental fields under ``choices[].message`` instead
+    of OpenAI's ``choices[].delta``. LangChain's ``ChatOpenAI`` only reads delta,
+    so without this rewrite Agent/MCP flows would accumulate zero assistant text.
+    Some gateways also emit ``delta: {}`` while the real payload lives in
+    ``message`` — treat that the same as a missing delta.
+    """
     normalized = copy.deepcopy(dict(chunk))
     choices = normalized.get("choices")
     if not isinstance(choices, list):
@@ -158,9 +194,10 @@ def normalize_58_stream_chunk(chunk: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(choice, Mapping):
             continue
         new_choice = dict(choice)
-        if new_choice.get("delta") is None:
-            delta = _58_message_to_delta(new_choice.get("message"))  # type: ignore[arg-type]
-            new_choice["delta"] = delta
+        if _delta_needs_message_fallback(new_choice.get("delta")):
+            merged_delta = _merge_message_into_delta(new_choice)
+            if merged_delta is not None:
+                new_choice["delta"] = merged_delta
         new_choices.append(new_choice)
 
     normalized["choices"] = new_choices
@@ -192,7 +229,24 @@ class Patched58ChatOpenAI(ChatOpenAI):
             original_messages,
             restore_reasoning_content,
         )
+        self._strip_user_message_names(payload)
         return payload
+
+    @staticmethod
+    def _strip_user_message_names(payload: dict) -> None:
+        """Drop internal ``name`` tags from user-role messages before ChatLing calls.
+
+        Middleware tags user messages with provenance names (``user-input``, etc.).
+        Some OpenAI-compatible gateways mishandle or reject inconsistent per-message
+        names; ChatLing has been observed to return empty assistant content when
+        they are present.
+        """
+        messages = payload.get("messages")
+        if not isinstance(messages, list):
+            return
+        for message in messages:
+            if isinstance(message, dict) and message.get("role") == "user":
+                message.pop("name", None)
 
     def _convert_chunk_to_generation_chunk(
         self,

@@ -55,6 +55,39 @@ def test_normalize_stream_chunk_moves_message_to_delta():
     assert "message" in normalized["choices"][0]
 
 
+def test_normalize_stream_chunk_falls_back_when_delta_is_empty_dict():
+    raw = {
+        "choices": [
+            {
+                "index": 0,
+                "delta": {},
+                "message": {"role": "assistant", "content": "2"},
+            }
+        ],
+    }
+    normalized = normalize_58_stream_chunk(raw)
+    assert normalized["choices"][0]["delta"]["content"] == "2"
+
+
+def test_convert_chunk_message_with_finish_reason_keeps_content():
+    model = Patched58ChatOpenAI(model="chatling-plus", api_key="test-key", base_url="https://example.com/api/v1")
+    chunk = normalize_58_stream_chunk(
+        {
+            "model": "chatling-plus",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": "1+1=2"},
+                }
+            ],
+        }
+    )
+    generation_chunk = model._convert_chunk_to_generation_chunk(chunk, AIMessageChunk, {})
+    assert generation_chunk is not None
+    assert generation_chunk.message.content == "1+1=2"
+
+
 def test_chatling_success_code_200_is_not_error():
     from deerflow.models.patched_58corp import _check_chatling_api_error
 
@@ -155,3 +188,16 @@ def test_convert_chunk_tool_call_stream():
     tool_chunks = generation_chunk.message.tool_call_chunks
     assert tool_chunks
     assert tool_chunks[0]["args"] == '{"city": "'
+
+
+def test_strip_user_message_names_from_request_payload() -> None:
+    model = Patched58ChatOpenAI(model="chatling-plus", api_key="test-key", base_url="https://example.com/api/v1")
+    payload = {
+        "messages": [
+            {"role": "user", "content": "hello", "name": "user-input"},
+            {"role": "assistant", "content": "hi"},
+        ]
+    }
+    model._strip_user_message_names(payload)
+    assert "name" not in payload["messages"][0]
+    assert payload["messages"][1] == {"role": "assistant", "content": "hi"}

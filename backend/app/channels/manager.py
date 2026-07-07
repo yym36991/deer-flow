@@ -403,7 +403,9 @@ def _accumulate_stream_text(
         return None, current_message_id
 
     payload_type = str(payload.get("type", "")).lower()
-    if "tool" in payload_type:
+    if "tool" in payload_type or payload_type in ("human", "system"):
+        return None, current_message_id
+    if payload_type and payload_type != "ai":
         return None, current_message_id
 
     text = _extract_text_content(payload.get("content"))

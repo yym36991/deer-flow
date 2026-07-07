@@ -11,6 +11,9 @@ from app.gateway.auth_middleware import AuthMiddleware
 from app.gateway.config import get_gateway_config
 from app.gateway.csrf_middleware import CSRFMiddleware, get_configured_cors_origins
 from app.gateway.deps import langgraph_runtime
+from app.gateway.log_level_reload import register_log_level_reload_signal, unregister_log_level_reload_signal
+from app.gateway.logging_setup import setup_gateway_logging
+from app.gateway.meishi_access_middleware import MeishiAccessLogMiddleware
 from app.gateway.routers import (
     agents,
     artifacts,
@@ -21,6 +24,7 @@ from app.gateway.routers import (
     features,
     feedback,
     mcp,
+    meishi,
     memory,
     models,
     runs,
@@ -32,18 +36,14 @@ from app.gateway.routers import (
 )
 from app.gateway.trace_middleware import TraceMiddleware, resolve_trace_enabled
 from deerflow.config import app_config as deerflow_app_config
-from deerflow.logging_config import DEFAULT_LOG_DATE_FORMAT, DEFAULT_LOG_FORMAT, configure_logging
+from deerflow.logging_config import configure_logging
 from deerflow.uploads.manager import cleanup_stale_upload_staging_files
 
 AppConfig = deerflow_app_config.AppConfig
 get_app_config = deerflow_app_config.get_app_config
 
-# Default logging; lifespan overrides from config.yaml log_level.
-logging.basicConfig(
-    level=logging.INFO,
-    format=DEFAULT_LOG_FORMAT,
-    datefmt=DEFAULT_LOG_DATE_FORMAT,
-)
+# Default logging; lifespan applies log_level / trace format via configure_logging.
+setup_gateway_logging(level=logging.INFO)
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +176,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
         startup_config = get_app_config()
         configure_logging(startup_config)
+        register_log_level_reload_signal()
         logger.info("Configuration loaded successfully")
         warn_if_auth_disabled_enabled()
     except Exception as e:
@@ -257,6 +258,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             logger.exception("Failed to stop channel service")
 
+        unregister_log_level_reload_signal()
+
     logger.info("Shutting down API Gateway")
 
 
@@ -335,6 +338,10 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
                 "description": "Generate follow-up question suggestions for conversations",
             },
             {
+                "name": "meishi",
+                "description": "58 Meishi (美事) intelligent assistant HTTP callbacks",
+            },
+            {
                 "name": "channels",
                 "description": "Manage IM channel integrations (Feishu, Slack, Telegram)",
             },
@@ -380,6 +387,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # configure_logging() at lifespan startup) out of sync with the middleware.
     app.add_middleware(TraceMiddleware, enabled=_resolve_trace_enabled_for_app_construction())
 
+    # 最外层：记录美事回调是否打到本实例（鉴权前）
+    app.add_middleware(MeishiAccessLogMiddleware)
+
     # Include routers
     # Models API is mounted at /api/models
     app.include_router(models.router)
@@ -416,6 +426,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Channels API is mounted at /api/channels
     app.include_router(channels.router)
+
+    # Meishi (58 internal assistant) callback API
+    app.include_router(meishi.router)
 
     # Assistants compatibility API (LangGraph Platform stub)
     app.include_router(assistants_compat.router)

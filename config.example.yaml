@@ -30,6 +30,16 @@ logging:
     enabled: false
     format: text
 
+# Gateway rolling file logs (wlog semantics: ``gateway_0.log`` is newest).
+# Restart required after edits. Env overrides: DEER_FLOW_LOG_DIR,
+# DEER_FLOW_LOG_BASE_NAME, DEER_FLOW_LOG_MAX_FILES, DEER_FLOW_LOG_MAX_SIZE_MB.
+# file_logging:
+#   enabled: true
+#   base_name: gateway
+#   max_files: 10
+#   max_file_size_mb: 10
+#   console: true
+
 # ============================================================================
 # Token Usage
 # ============================================================================

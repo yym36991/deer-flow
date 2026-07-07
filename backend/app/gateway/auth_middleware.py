@@ -36,6 +36,7 @@ _PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
     "/openapi.json",
     "/api/v1/auth/oauth/",
     "/api/v1/auth/callback/",
+    "/api/meishi",
 )
 
 # Exact auth paths that are public (login/register/status check).

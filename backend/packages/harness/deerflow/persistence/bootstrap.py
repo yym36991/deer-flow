@@ -225,7 +225,8 @@ def _get_head_revision() -> str:
 def _reflect_state(sync_conn: Any) -> dict[str, bool]:
     """Inspect *sync_conn* (sync connection inside ``run_sync``) and return:
 
-    - ``has_alembic_version``: bool
+    - ``has_alembic_version``: True iff ``alembic_version`` contains at least
+      one stamped revision row (an empty bookkeeping table does not count).
     - ``has_deerflow_tables``: True iff at least one table that ``Base.metadata``
       knows about is present in the DB. Computed as ``reflected ∩ metadata`` so
       the bootstrap layer never hardcodes a specific table or column name --
@@ -243,8 +244,12 @@ def _reflect_state(sync_conn: Any) -> dict[str, bool]:
     insp = sa_inspect(sync_conn)
     reflected = set(insp.get_table_names())
     metadata_tables = set(Base.metadata.tables)
+    has_version_row = False
+    if "alembic_version" in reflected:
+        row = sync_conn.execute(text("SELECT 1 FROM alembic_version LIMIT 1")).fetchone()
+        has_version_row = row is not None
     return {
-        "has_alembic_version": "alembic_version" in reflected,
+        "has_alembic_version": has_version_row,
         "has_deerflow_tables": bool(reflected & metadata_tables),
     }
 

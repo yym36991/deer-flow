@@ -45,6 +45,9 @@ def should_check_csrf(request: Request) -> bool:
         return False
 
     path = request.url.path.rstrip("/")
+    # 美事服务端回调使用 signStr 鉴权，无浏览器 CSRF cookie。
+    if path.startswith("/api/meishi"):
+        return False
     # Exempt /api/v1/auth/me endpoint
     if path == "/api/v1/auth/me":
         return False

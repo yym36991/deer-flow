@@ -281,6 +281,8 @@ FastAPI application on port 8001 with health check at `GET /health`. Set `GATEWA
 
 CORS is same-origin by default when requests enter through nginx on port 2026. Split-origin or port-forwarded browser clients must opt in with `GATEWAY_CORS_ORIGINS` (comma-separated exact origins); Gateway `CORSMiddleware` and `CSRFMiddleware` both read that variable so browser CORS and auth-origin checks stay aligned.
 
+**File logging** (cloud / bare-metal Gateway): wlog-style rolling files via `app/gateway/logging_setup.py` + `backend/wlog/`. Config YAML section `file_logging` (or env `DEER_FLOW_LOG_DIR`, `DEER_FLOW_LOG_BASE_NAME`, …). Active file is `{base_name}_0.log` (newest); rotation shifts `_0→_1…` and drops the oldest. `log_level` can be hot-reloaded with `kill -USR1 <uvicorn-pid>`; `file_logging` changes require restart.
+
 **Routers**:
 
 | Router | Endpoints |
