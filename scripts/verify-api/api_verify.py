@@ -13,6 +13,8 @@ DeerFlow API 手动验证。
 子命令:
   init-admin | register | login | me
   create-thread | chat | chat-stream
+  internal-create-thread | internal-stream
+  integration-create-thread | integration-stream
   search-threads | list-runs | inspect-db
 """
 
@@ -46,6 +48,12 @@ CONFIG: dict[str, Any] = {
     "thread_metadata": {"label": "api-verify"},
     "admin_email": "admin@example.com",
     "admin_password": "AdminPass123!",
+    # Internal Token 集成（与 start-gateway.sh 默认一致）
+    "internal_token": "X-DeerFlow-Internal-Token-valid",
+    "internal_owner": "zhangsan",
+    # Integration API（JIT 用户 + JWT）
+    "integration_username": "zhangsan",
+    "integration_password": "Integr8Pass!",
 }
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -178,6 +186,13 @@ def _log_http_exchange(
     print()
 
 
+def _internal_headers(owner: str | None = None) -> dict[str, str]:
+    return {
+        "X-DeerFlow-Internal-Token": str(CONFIG["internal_token"]),
+        "X-DeerFlow-Owner-User-Id": (owner or CONFIG["internal_owner"]).strip(),
+    }
+
+
 def _request(
     method: str,
     path: str,
@@ -185,6 +200,8 @@ def _request(
     body: dict | None = None,
     form: dict[str, str] | None = None,
     need_csrf: bool = False,
+    internal: bool = False,
+    internal_owner: str | None = None,
     stream: bool = False,
     timeout: float = 300,
 ) -> Any:
@@ -203,6 +220,9 @@ def _request(
     req = urllib.request.Request(url, data=data, method=method)
     if data is not None:
         req.add_header("Content-Type", content_type)
+    if internal:
+        for k, v in _internal_headers(internal_owner).items():
+            req.add_header(k, v)
     if cookies:
         req.add_header("Cookie", "; ".join(f"{k}={v}" for k, v in cookies.items()))
     if need_csrf and cookies.get("csrf_token"):
@@ -323,6 +343,102 @@ def cmd_create_thread(args: argparse.Namespace) -> None:
     _save_state(thread_id=tid)
     print(f"thread_id 已保存到 {_state_path()}")
     print(f"thread_id = {tid}")
+
+
+def cmd_internal_create_thread(args: argparse.Namespace) -> None:
+    owner = (getattr(args, "owner", None) or CONFIG["internal_owner"]).strip()
+    tid = _resolve_thread_id(args) or str(uuid.uuid4())
+    if not _resolve_thread_id(args) and not CONFIG.get("thread_id"):
+        print(f"自动生成 thread_id: {tid} (owner={owner})")
+    _request(
+        "POST",
+        "/api/threads",
+        body={"thread_id": tid, "metadata": {**CONFIG["thread_metadata"], "owner": owner}},
+        internal=True,
+        internal_owner=owner,
+    )
+    _save_state(thread_id=tid, internal_owner=owner)
+    print(f"thread_id = {tid}")
+    print(f"owner = {owner}")
+
+
+def cmd_integration_create_thread(args: argparse.Namespace) -> None:
+    username = (getattr(args, "username", None) or CONFIG["integration_username"]).strip()
+    password = getattr(args, "password", None) or CONFIG["integration_password"]
+    tid = _resolve_thread_id(args) or str(uuid.uuid4())
+    if not _resolve_thread_id(args) and not CONFIG.get("thread_id"):
+        print(f"自动生成 thread_id: {tid} (username={username})")
+    r = _request(
+        "POST",
+        "/api/v1/integration/threads",
+        body={
+            "thread_id": tid,
+            "username": username,
+            "password": password,
+            "metadata": {**CONFIG["thread_metadata"], "owner": username},
+        },
+    )
+    _save_state(thread_id=r.get("thread_id") or tid, integration_username=username)
+    print(f"thread_id = {r.get('thread_id') or tid}")
+    cookies = _load_cookies()
+    if cookies.get("access_token"):
+        print("access_token / csrf_token 已从 Set-Cookie 写入 cookie 文件，可 integration-stream")
+
+
+def cmd_integration_stream(args: argparse.Namespace) -> None:
+    tid = _resolve_thread_id(args)
+    if not tid:
+        sys.exit("需要 thread_id，请先 integration-create-thread")
+    msg = args.message or CONFIG["message"]
+    print(f"thread_id={tid}\nmessage={msg}")
+    resp = _request(
+        "POST",
+        f"/api/threads/{tid}/runs/stream",
+        body={
+            "assistant_id": "lead_agent",
+            "input": {"messages": [{"role": "human", "content": msg}]},
+            "stream_mode": ["values"],
+        },
+        need_csrf=True,
+        stream=True,
+        timeout=600,
+    )
+    try:
+        print("--- 响应体 (stream) ---")
+        while chunk := resp.read(4096):
+            print(chunk.decode(errors="replace"), end="", flush=True)
+    finally:
+        resp.close()
+    print()
+
+
+def cmd_internal_stream(args: argparse.Namespace) -> None:
+    owner = (getattr(args, "owner", None) or _load_state().get("internal_owner") or CONFIG["internal_owner"]).strip()
+    tid = _resolve_thread_id(args)
+    if not tid:
+        sys.exit("需要 thread_id，请先 internal-create-thread")
+    msg = args.message or CONFIG["message"]
+    print(f"owner={owner} thread_id={tid}\nmessage={msg}")
+    resp = _request(
+        "POST",
+        f"/api/threads/{tid}/runs/stream",
+        body={
+            "assistant_id": "lead_agent",
+            "input": {"messages": [{"role": "human", "content": msg}]},
+            "stream_mode": ["values"],
+        },
+        internal=True,
+        internal_owner=owner,
+        stream=True,
+        timeout=600,
+    )
+    try:
+        print("--- 响应体 (stream) ---")
+        while chunk := resp.read(4096):
+            print(chunk.decode(errors="replace"), end="", flush=True)
+    finally:
+        resp.close()
+    print()
 
 
 def cmd_chat(args: argparse.Namespace) -> None:
@@ -459,10 +575,24 @@ def main() -> None:
         sub.add_parser(name, help=help_)
     ct = sub.add_parser("create-thread", help="创建 thread（自动保存 thread_id）")
     ct.add_argument("--thread-id", default="", help="指定 thread_id，默认自动生成")
+    ict = sub.add_parser("internal-create-thread", help="Internal Token 创建 thread（无需注册）")
+    ict.add_argument("--thread-id", default="")
+    ict.add_argument("--owner", default="", help="X-DeerFlow-Owner-User-Id，默认 zhangsan")
+    igt = sub.add_parser("integration-create-thread", help="Integration API 创建 thread（JIT 用户 + JWT）")
+    igt.add_argument("--thread-id", default="")
+    igt.add_argument("--username", default="", help="企业用户名，默认 zhangsan")
+    igt.add_argument("--password", default="", help="集成方保管的 DeerFlow 密码")
     for name in ("chat", "chat-stream"):
         sp = sub.add_parser(name, help="对话（自动读取已保存的 thread_id）")
         sp.add_argument("--thread-id", default="")
         sp.add_argument("-m", "--message", default="")
+    ist = sub.add_parser("internal-stream", help="Internal Token 流式对话")
+    ist.add_argument("--thread-id", default="")
+    ist.add_argument("--owner", default="")
+    ist.add_argument("-m", "--message", default="")
+    igst = sub.add_parser("integration-stream", help="Integration JWT 流式对话（需先 integration-create-thread）")
+    igst.add_argument("--thread-id", default="")
+    igst.add_argument("-m", "--message", default="")
     lr = sub.add_parser("list-runs")
     lr.add_argument("--thread-id", default="")
     args = p.parse_args()
@@ -472,8 +602,12 @@ def main() -> None:
         "login": cmd_login,
         "me": cmd_me,
         "create-thread": cmd_create_thread,
+        "internal-create-thread": cmd_internal_create_thread,
+        "integration-create-thread": cmd_integration_create_thread,
         "chat": cmd_chat,
         "chat-stream": cmd_chat_stream,
+        "internal-stream": cmd_internal_stream,
+        "integration-stream": cmd_integration_stream,
         "search-threads": cmd_search_threads,
         "list-runs": cmd_list_runs,
         "inspect-db": cmd_inspect_db,

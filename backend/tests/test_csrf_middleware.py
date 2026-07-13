@@ -235,6 +235,31 @@ def test_non_auth_mutation_rejects_mismatched_double_submit_token():
     assert response.json()["detail"] == "CSRF token mismatch."
 
 
+def test_non_auth_mutation_skips_csrf_for_trusted_internal_token(monkeypatch):
+    import importlib
+
+    import app.gateway.csrf_middleware as csrf_middleware
+    import app.gateway.internal_auth as internal_auth
+
+    monkeypatch.setenv("DEER_FLOW_INTERNAL_AUTH_TOKEN", "shared-token")
+    importlib.reload(internal_auth)
+    importlib.reload(csrf_middleware)
+    try:
+        client = TestClient(_make_app(), base_url="https://deerflow.example")
+        response = client.post(
+            "/api/threads/abc/runs/stream",
+            headers={
+                internal_auth.INTERNAL_AUTH_HEADER_NAME: "shared-token",
+                internal_auth.INTERNAL_OWNER_USER_ID_HEADER_NAME: "zhangsan",
+            },
+        )
+        assert response.status_code == 200
+    finally:
+        monkeypatch.delenv("DEER_FLOW_INTERNAL_AUTH_TOKEN", raising=False)
+        importlib.reload(internal_auth)
+        importlib.reload(csrf_middleware)
+
+
 def test_channel_posts_require_double_submit_csrf():
     client = TestClient(_make_app(), base_url="https://deerflow.example")
 

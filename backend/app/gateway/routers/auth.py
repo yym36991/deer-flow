@@ -549,8 +549,11 @@ async def close_oidc_service() -> None:
         delattr(_get_oidc_service, "_instance")
 
 
-def _set_csrf_cookie(response: Response, request: Request) -> None:
-    """Set the CSRF double-submit cookie (needed for GET-based OIDC callback)."""
+def _set_csrf_cookie(response: Response, request: Request) -> str:
+    """Set the CSRF double-submit cookie (needed for GET-based OIDC callback).
+
+    Returns the generated token so callers can echo it in JSON for API clients.
+    """
     csrf_token = generate_csrf_token()
     is_https = is_secure_request(request)
     response.set_cookie(
@@ -564,6 +567,7 @@ def _set_csrf_cookie(response: Response, request: Request) -> None:
         # session whose csrf_token was dropped (e.g. iOS Safari PWA termination).
         max_age=get_auth_config().token_expiry_days * 24 * 3600 if is_https else None,
     )
+    return csrf_token
 
 
 def _resolve_oidc_redirect_uri(request: Request, provider_id: str, provider_config: OIDCProviderConfig) -> str:

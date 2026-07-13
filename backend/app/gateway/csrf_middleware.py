@@ -16,6 +16,7 @@ from starlette.types import ASGIApp
 
 from app.gateway.auth.config import get_auth_config
 from app.gateway.auth_disabled import is_auth_disabled
+from app.gateway.internal_auth import INTERNAL_AUTH_HEADER_NAME, is_valid_internal_auth_token
 
 CSRF_COOKIE_NAME = "csrf_token"
 CSRF_HEADER_NAME = "X-CSRF-Token"
@@ -44,7 +45,15 @@ def should_check_csrf(request: Request) -> bool:
     if is_auth_disabled():
         return False
 
+    # Trusted server-to-server callers (IM workers, internal API integrations)
+    # authenticate with X-DeerFlow-Internal-Token instead of browser cookies.
+    if is_valid_internal_auth_token(request.headers.get(INTERNAL_AUTH_HEADER_NAME)):
+        return False
+
     path = request.url.path.rstrip("/")
+    # Integration entry point authenticates in-handler (username/password or cookie).
+    if path == "/api/v1/integration/threads":
+        return False
     # Exempt /api/v1/auth/me endpoint
     if path == "/api/v1/auth/me":
         return False
@@ -61,6 +70,7 @@ _AUTH_EXEMPT_PATHS: frozenset[str] = frozenset(
         "/api/v1/auth/logout",
         "/api/v1/auth/register",
         "/api/v1/auth/initialize",
+        "/api/v1/integration/threads",
     }
 )
 

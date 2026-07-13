@@ -26,6 +26,7 @@ from app.gateway.auth_disabled import (
 )
 from app.gateway.authz import _ALL_PERMISSIONS, AuthContext
 from app.gateway.internal_auth import INTERNAL_AUTH_HEADER_NAME, get_internal_user, is_valid_internal_auth_token
+from app.gateway.deps import get_access_token_from_request
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 # Paths that never require authentication.
@@ -51,6 +52,7 @@ _PUBLIC_EXACT_PATHS: frozenset[str] = frozenset(
         "/api/v1/auth/setup-status",
         "/api/v1/auth/initialize",
         "/api/v1/auth/providers",
+        "/api/v1/integration/threads",
     }
 )
 
@@ -104,7 +106,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             internal_user = get_internal_user(owner_user_id=owner_user_id or None)
 
         auth_source = AUTH_SOURCE_SESSION
-        access_token = request.cookies.get("access_token")
+        access_token = get_access_token_from_request(request)
 
         # Non-public path: require session cookie
         if internal_user is not None:

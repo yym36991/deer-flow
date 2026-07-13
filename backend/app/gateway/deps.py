@@ -428,8 +428,13 @@ def get_local_provider() -> LocalAuthProvider:
     return _cached_local_provider
 
 
+def get_access_token_from_request(request: Request) -> str | None:
+    """Extract session JWT from the ``access_token`` HttpOnly cookie."""
+    return request.cookies.get("access_token")
+
+
 async def get_current_user_from_request(request: Request):
-    """Get the current authenticated user from the request cookie.
+    """Get the current authenticated user from the ``access_token`` cookie.
 
     Raises HTTPException 401 if not authenticated.
     """
@@ -447,7 +452,7 @@ async def get_current_user_from_request(request: Request):
     from app.gateway.auth import decode_token
     from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse, TokenError, token_error_to_code
 
-    access_token = request.cookies.get("access_token")
+    access_token = get_access_token_from_request(request)
     if not access_token:
         raise HTTPException(
             status_code=401,

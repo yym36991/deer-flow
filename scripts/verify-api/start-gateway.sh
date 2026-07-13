@@ -26,5 +26,9 @@ echo
 export DEER_FLOW_PROJECT_ROOT="$ROOT"
 export DEER_FLOW_CONFIG_PATH="$ROOT/config.yaml"
 
+# Internal API 集成（共享密钥 + X-DeerFlow-Owner-User-Id 做用户隔离）
+# 生产请改为长随机串，且仅内网可达；勿提交到 git。
+export DEER_FLOW_INTERNAL_AUTH_TOKEN="${DEER_FLOW_INTERNAL_AUTH_TOKEN:-X-DeerFlow-Internal-Token-valid}"
+
 PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 \
   uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --reload

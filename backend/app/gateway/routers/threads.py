@@ -467,13 +467,16 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
     return response
 
 
-@router.post("", response_model=ThreadResponse)
-async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadResponse:
-    """Create a new thread.
+async def create_thread_for_user(
+    request: Request,
+    body: ThreadCreateRequest,
+    *,
+    owner_user_id: str | None = None,
+) -> ThreadResponse:
+    """Create a thread owned by ``owner_user_id`` or the request auth context.
 
-    Writes a thread_meta record (so the thread appears in /threads/search)
-    and an empty checkpoint (so state endpoints work immediately).
-    Idempotent: returns the existing record when ``thread_id`` already exists.
+    When ``owner_user_id`` is omitted, uses the trusted internal owner header
+    if present; otherwise relies on the request-scoped user contextvar.
     """
     from app.gateway.deps import get_thread_store
 
@@ -481,18 +484,19 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
     thread_store = get_thread_store(request)
     thread_id = body.thread_id or str(uuid.uuid4())
     now = now_iso()
-    thread_owner_user_id = get_trusted_internal_owner_user_id(request)
-    thread_owner_kwargs = {"user_id": thread_owner_user_id} if thread_owner_user_id else {}
+    if owner_user_id is None:
+        owner_user_id = get_trusted_internal_owner_user_id(request)
+    thread_owner_kwargs = {"user_id": owner_user_id} if owner_user_id else {}
     # ``body.metadata`` is already stripped of server-reserved keys by
     # ``ThreadCreateRequest._strip_reserved`` — see the model definition.
 
     # Idempotency: return existing record when already present
     existing_record = await thread_store.get(thread_id, **thread_owner_kwargs)
-    if existing_record is None and thread_owner_user_id:
+    if existing_record is None and owner_user_id:
         unscoped_record = await thread_store.get(thread_id, user_id=None)
         if unscoped_record is not None:
-            if unscoped_record.get("user_id") != thread_owner_user_id:
-                await thread_store.update_owner(thread_id, thread_owner_user_id, user_id=None)
+            if unscoped_record.get("user_id") != owner_user_id:
+                await thread_store.update_owner(thread_id, owner_user_id, user_id=None)
             existing_record = await thread_store.get(thread_id, **thread_owner_kwargs)
     if existing_record is not None:
         return ThreadResponse(
@@ -539,6 +543,17 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
         updated_at=now,
         metadata=body.metadata,
     )
+
+
+@router.post("", response_model=ThreadResponse)
+async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadResponse:
+    """Create a new thread.
+
+    Writes a thread_meta record (so the thread appears in /threads/search)
+    and an empty checkpoint (so state endpoints work immediately).
+    Idempotent: returns the existing record when ``thread_id`` already exists.
+    """
+    return await create_thread_for_user(request, body)
 
 
 @router.post("/{thread_id}/branches", response_model=ThreadBranchResponse)
