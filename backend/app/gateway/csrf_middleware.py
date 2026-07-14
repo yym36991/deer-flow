@@ -44,6 +44,14 @@ def should_check_csrf(request: Request) -> bool:
     if is_auth_disabled():
         return False
 
+    # Trusted Gateway internal callers (IM channel workers, Meishi, curl with
+    # shared DEER_FLOW_INTERNAL_AUTH_TOKEN) authenticate via header, not a
+    # browser cookie session — skip double-submit CSRF for them.
+    from app.gateway.internal_auth import INTERNAL_AUTH_HEADER_NAME, is_valid_internal_auth_token
+
+    if is_valid_internal_auth_token(request.headers.get(INTERNAL_AUTH_HEADER_NAME)):
+        return False
+
     path = request.url.path.rstrip("/")
     # Exempt /api/v1/auth/me endpoint
     if path == "/api/v1/auth/me":

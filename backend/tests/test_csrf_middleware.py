@@ -245,3 +245,36 @@ def test_channel_posts_require_double_submit_csrf():
 
     assert response.status_code == 403
     assert response.json()["detail"] == "CSRF token missing. Include X-CSRF-Token header."
+
+
+def test_trusted_internal_token_skips_csrf(monkeypatch):
+    import importlib
+
+    import app.gateway.csrf_middleware as csrf_middleware
+    import app.gateway.internal_auth as internal_auth
+    from fastapi import FastAPI
+
+    monkeypatch.setenv("DEER_FLOW_INTERNAL_AUTH_TOKEN", "shared-token")
+    importlib.reload(internal_auth)
+    reloaded_csrf = importlib.reload(csrf_middleware)
+    try:
+        app = FastAPI()
+        app.add_middleware(reloaded_csrf.CSRFMiddleware)
+
+        @app.post("/api/threads/abc/runs/stream")
+        async def protected_mutation():
+            return {"ok": True}
+
+        client = TestClient(app, base_url="https://deerflow.example")
+        response = client.post(
+            "/api/threads/abc/runs/stream",
+            headers={
+                internal_auth.INTERNAL_AUTH_HEADER_NAME: "shared-token",
+                internal_auth.INTERNAL_OWNER_USER_ID_HEADER_NAME: "zhangsan",
+            },
+        )
+        assert response.status_code == 200
+    finally:
+        monkeypatch.delenv("DEER_FLOW_INTERNAL_AUTH_TOKEN", raising=False)
+        importlib.reload(internal_auth)
+        importlib.reload(csrf_middleware)
