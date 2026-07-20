@@ -1440,11 +1440,9 @@ curl -i -N -X POST "${GATEWAY}/api/runs/stream" \
 
 ## 七、人在回路 HITL
 
-当 Agent 调用 `ask_clarification` 时，run 暂停，等待**平台侧**把业务用户的答案通过 API 回传。平台需：
+**人在回路（HITL）**：Agent 执行过程中暂停，由**平台侧**把工人/业务用户的**选择或文字**回传后，再继续同一 Thread 上的 run。
 
-1. 从 SSE（或 `GET /api/threads/{id}/state`）解析 pending 问题
-2. 从你们的业务系统收集该 Owner 的答案
-3. 再调 `POST /api/runs/stream`，在消息中携带 `human_input_response`
+DeerFlow 内置机制是 **`ask_clarification` 工具**：模型调用后 run 暂停；平台解析 SSE（或 `GET /api/threads/{id}/state`），经业务 UI 收集答案，再 `POST /api/runs/stream` 携带 `human_input_response` 续跑。
 
 **本章所有 HITL 续跑请求统一请求头：**
 
@@ -1455,7 +1453,99 @@ curl -i -N -X POST "${GATEWAY}/api/runs/stream" \
 | `X-DeerFlow-Internal-Token` | 是 | Internal Token |
 | `X-DeerFlow-Owner-User-Id` | 是 | 须与触发 HITL 的 Thread **同一 Owner** |
 
-### 7.1 识别待回复问题
+### 7.1 应用场景：对话补全 vs 业务卡点
+
+两类常见需求都**可以**走同一套 HITL API，但**集成责任不同**。
+
+#### 7.1.1 对话补全（模型主动问）
+
+| 维度 | 说明 |
+|------|------|
+| **典型问题** | 信息缺失、需求歧义、多种实现方案选哪一个 |
+| **谁触发暂停** | **模型**决定调用 `ask_clarification` |
+| **clarification_type** | `missing_info`、`ambiguous_requirement`、`approach_choice` 等 |
+| **平台职责** | 展示问题 → 收集答案 → `human_input_response` 续跑 |
+| **确定性** | **软**：模型可能该问没问、或一次问多个（应引导一次一问） |
+
+示例：「部署到哪个环境？」→ 工人选「测试环境」→ Agent 继续。
+
+#### 7.1.2 业务卡点（动作前必须工人介入）
+
+| 维度 | 说明 |
+|------|------|
+| **典型问题** | 执行某操作**之前**必须工人**确认、单选、或多行输入**（非付款专属：放行工单、改生产配置、覆盖文件、调用外部 API 等） |
+| **业务要求** | 卡点位置由**业务规则**决定，不能仅靠模型「自觉」 |
+| **DeerFlow 机制** | 仍通过 **`ask_clarification` 暂停 + `human_input_response` 续跑**；差异在**谁保证在正确时机提问** |
+| **确定性** | 要**硬卡点**时，需平台或 Agent 配置配合（见 **§7.1.4**） |
+
+示例：
+
+```text
+Agent 生成变更方案
+    → ask_clarification（risk_confirmation：「确认对订单 #123 执行重试？」options: [执行, 取消]）
+    → run 暂停
+    → 平台工单 UI：工人点「执行」
+    → human_input_response 续跑
+    → Agent 调用后续工具 / MCP
+```
+
+`ask_clarification` 支持的 `clarification_type` 与业务卡点的对应关系：
+
+| clarification_type | 工人交互 | 业务卡点示例 |
+|--------------------|----------|--------------|
+| `risk_confirmation` | 确认/取消 | 覆盖生产数据、批量重试、删除资源 |
+| `approach_choice` | 单选方案 | 选 A/B 部署路径、选处理策略 |
+| `missing_info` | 自由文本或选项 | 补工单号、设备编号、审批单号 |
+| `ambiguous_requirement` | 澄清歧义 | 「重启服务」指哪一组机器 |
+| `suggestion` | 采纳/拒绝建议 | Agent 建议跳过某步骤，工人拍板 |
+
+`input_mode` 由 Agent 是否传入 `options` 决定：**有 options → 选择题**（`choice_with_other`）；**无 options → 自由文本**（`free_text`）。
+
+#### 7.1.3 能力边界（平台集成须知）
+
+| 能力 | 说明 |
+|------|------|
+| **支持** | 暂停 run；工人**选择**或**输入文字**；同一 Thread 多轮 HITL；`GET .../state` 轮询 pending |
+| **不支持（开箱）** | 按业务工作流「节点名」自动停（如固定停在「支付模块前」）；须用 **§7.1.4** 模式实现 |
+| **`interrupt_before` / `interrupt_after`** | LangGraph **图内部节点**调试参数，**不是**业务步骤名；平台日常集成**不必使用** |
+| **Guardrails** | 工具执行前 **ALLOW/DENY** 策略，**不暂停**等人输入；可与 HITL 并存（Deny 危险 tool，Clarify 需确认的操作） |
+| **定时 / 非交互 run** | `context.non_interactive=true` 时 **不含** `ask_clarification`；后台任务不能用本章 HITL，应拆 run 或由平台编排 |
+
+#### 7.1.4 业务卡点推荐集成模式
+
+**模式 A — Agent + SOUL 约束（实现快，软保证）**
+
+在自定义 Agent 的 `SOUL.md` 中写清：**凡涉及 {列出动作}，必须先 `ask_clarification`，`clarification_type=risk_confirmation`，并给出 options**。  
+适合：内部工具、低风险；**不能**单独作为合规级硬拦截。
+
+**模式 B — 平台拆段 run（硬保证，推荐）**
+
+```text
+Run1: Agent 做到「待工人确认」→ 输出结构化结果（JSON/表格）→ run 结束
+平台: 业务 UI 展示，工人选择/输入 → 写入业务库
+Run2: 同一 thread_id 再 stream，messages 带上工人结论（可不用 ask_clarification）
+```
+
+卡点**100% 在平台**；DeerFlow 只负责前后两段推理。适合：工单、审批、必须审计的操作。
+
+**模式 C — 同一 Thread 多轮 HITL（本章 API 原生路径）**
+
+Agent 在关键步骤 `ask_clarification` → 平台 `human_input_response` → 继续；可循环多轮（见 **§7.4**）。  
+适合：对话式作业，工人与 Agent 交替；需在 SOUL/Skill 里约束「执行 X 前必须问」。
+
+**模式 D — 限制工具 + Clarify（组合）**
+
+`tool_groups` 去掉危险组（如 `bash`、`file:write`），仅保留只读；敏感动作走专用 MCP，且 SOUL 要求调用前先 `risk_confirmation`。  
+适合：只读顾问 + 少量需确认的写操作。
+
+**平台侧统一处理流程（模式 B/C 共用续跑协议）：**
+
+1. 监听 SSE / 轮询 state，发现 `artifact.human_input.kind == "human_input_request"`
+2. 映射到业务 UI（工单、弹窗、移动端）：展示 `question`、`options` 或文本框
+3. 工人提交后，调用 **§7.3** 的 `human_input_response` 格式续跑
+4. **`Owner` 与 `thread_id` 全程不变**
+
+### 7.2 识别待回复问题
 
 在 `event: values` 的 `messages` 末尾查找：
 
@@ -1491,7 +1581,7 @@ curl -i -N -X POST "${GATEWAY}/api/runs/stream" \
 
 **必须保存 `request_id`**（格式 `clarification:{tool_call_id}`）。Agent 重新提问时会生成新的 `tool_call_id`，旧 ID 失效。
 
-### 7.2 回复请求格式
+### 7.3 回复请求格式
 
 **请求头**：见本章开头统一请求头表（`X-DeerFlow-Owner-User-Id` **必填**）
 
@@ -1511,7 +1601,7 @@ curl -i -N -X POST "${GATEWAY}/api/runs/stream" \
 | `version` | 是 | 固定 `1` |
 | `kind` | 是 | 固定 `"human_input_response"` |
 | `source` | 是 | 固定 `"ask_clarification"` |
-| `request_id` | 是 | 来自 7.1，必须是**当前 pending** 问题的 ID |
+| `request_id` | 是 | 来自 **§7.2**，必须是**当前 pending** 问题的 ID |
 | `response_kind` | 是 | `"option"`（选择题）或 `"text"`（自由文本） |
 | `option_id` | 选择题必填 | 如 `option-2`，对应 SSE 中 options 顺序 |
 | `value` | 是 | 选项值或自由文本 |
@@ -1560,9 +1650,9 @@ curl -i -N -X POST "${GATEWAY}/api/runs/stream" \
 "value": "我们用的是 Kubernetes 集群"
 ```
 
-### 7.3 多轮 HITL 流程
+### 7.4 多轮 HITL 流程
 
-典型场景（平台代 Owner=`zhangsan` 操作，3 步）：
+**示例 A — 对话补全**（平台代 Owner=`zhangsan`，3 步）：
 
 ```
 Step1  平台 POST runs/stream 发任务 → Agent ask_clarification（目标环境）
@@ -1570,9 +1660,18 @@ Step2  平台解析 SSE，经业务 UI 收集答案后 POST 回复 → Agent 再
 Step3  平台再次回复 → Agent 继续执行或继续 clarify
 ```
 
+**示例 B — 业务卡点**（工人确认后再执行）：
+
+```
+Step1  平台：「对批次 B-2026 执行重新质检」→ Agent 产出方案并 ask_clarification
+        （risk_confirmation，options: [确认执行, 取消]）
+Step2  平台工单 UI：工人点「确认执行」→ human_input_response（response_kind=option）
+Step3  Agent 继续调用 file/MCP 等工具完成后续步骤
+```
+
 每一步都要从**最新** SSE 取新的 `request_id`；**Owner 头全程保持为同一业务用户**（如 `zhangsan`）。
 
-### 7.4 关键注意事项（必读）
+### 7.5 关键注意事项（必读）
 
 | # | 规则 |
 |---|------|
@@ -1583,7 +1682,7 @@ Step3  平台再次回复 → Agent 继续执行或继续 clarify
 | 5 | 建议 JSON 放文件用 `-d @file.json`；HITL 请求同样必须带齐 Internal Token 与 Owner 头 |
 | 6 | Owner 与 Thread 创建/首聊时不一致会导致 404 或续跑失败 |
 
-### 7.5 验证脚本
+### 7.6 验证脚本
 
 仓库内可复现：
 
@@ -1606,7 +1705,7 @@ bash scripts/verify-api/test-human-in-the-loop.sh
 3. POST /api/threads（可选：预置 thread_id / metadata）
 4. POST /api/runs/stream → 解析 SSE metadata，持久化 thread_id
 5. 循环：业务消息 → runs/stream（同一 Owner + thread_id）
-6. 遇 ask_clarification → 解析 request_id → human_input_response → 再 stream（Owner 不变）
+6. 遇 ask_clarification（对话补全或业务卡点）→ 业务 UI 收集工人选择/文字 → human_input_response → 再 stream（Owner 不变）
 7. 需要文件 → POST /api/threads/{id}/uploads（Owner 必填）→ 消息引用虚拟路径
 8. 需要专属 Agent → POST /api/agents（Owner 必填）→ assistant_id 指向该 Agent
 ```
