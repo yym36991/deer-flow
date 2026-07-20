@@ -280,7 +280,25 @@ curl -sS "${GATEWAY}/api/threads/my-thread-001/state" \
 
 | 参数 | 必填 | 说明 |
 |------|------|------|
-| `metadata` | 是 | 要与现有 metadata **合并**的键值对（非整体覆盖） |
+| `metadata` | 是 | 要与现有 metadata **浅合并**的键值对：同名字段**覆盖**为新值，新字段**追加**，未出现在请求体中的旧字段**保留**。不会出现两个同名 key |
+
+**合并示例**
+
+假设 Thread 创建时 metadata 为：
+
+```json
+{"label": "部署助手", "source": "ops-platform"}
+```
+
+执行下方 PATCH 后，结果为（**只有一个 `label`**）：
+
+```json
+{"label": "生产部署", "source": "ops-platform", "priority": "high"}
+```
+
+- `label`：`部署助手` → `生产部署`（覆盖，不是新增第二个 label）
+- `source`：未出现在 PATCH 中，**保留**
+- `priority`：新键，**追加**
 
 **示例**
 
@@ -474,43 +492,32 @@ curl -i -N -X POST "${GATEWAY}/api/runs/stream" \
 
 ## 四、Skills 接入
 
-Skills 是给 Agent 的**领域能力包**（Markdown 指令 + 可选脚本/资源）。Agent 运行时通过内置 skill 工具按需加载 `SKILL.md` 内容。
+Skills 是给 Agent 的**领域能力包**（Markdown 指令 + 可选脚本/资源）。Agent 在对话中通过内置工具按需加载 `SKILL.md`，无需用户在每条消息里手动指定 Skill 名称。
 
-### 4.1 目录与配置
+本章分三部分说明：
 
-| 路径 | 说明 |
-|------|------|
-| `skills/public/` | 仓库内置 Skill，随 Git 提交 |
-| `skills/custom/` | 用户/租户自定义 Skill，通常 gitignore |
-| `extensions_config.json` | 根目录配置文件，控制 **public** Skill 的启用状态 |
+1. **管理员 / 运维**：如何为全站用户启用、发布 **public Skill**
+2. **终端用户**（使用你们部署的 DeerFlow 服务的业务用户）：如何**使用**和**创建**自己的 **custom Skill**
+3. **平台 HTTP 集成**（Internal Token）：业务系统能调哪些 Skill 相关 API
 
-从模板复制：
+---
 
-```bash
-cp extensions_config.example.json extensions_config.json
-```
+### 4.1 两类 Skill 与存储位置
 
-**public Skill 启用示例**（`extensions_config.json`）：
+| 类型 | 存放位置 | 谁维护 | 启用开关存在哪 | 作用范围 |
+|------|----------|--------|----------------|----------|
+| **public** | `skills/public/{name}/` | 管理员 / 运维（随部署或 Git） | 全局 `extensions_config.json` | **所有用户**共享同一套开关 |
+| **custom** | `.deer-flow/users/{user_id}/skills/custom/{name}/` | 终端用户（或 Agent 代写） | 用户级 `_skill_states.json` | **仅该用户**可见、可编辑 |
 
-```json
-{
-  "mcpServers": {},
-  "skills": {
-    "deep-research": {"enabled": true},
-    "frontend-design": {"enabled": false}
-  }
-}
-```
+Legacy 说明：旧版全局 `skills/custom/` 目录中的 Skill 会以 **LEGACY** 只读形式展示；用户一旦创建了自己的 custom Skill，Legacy 列表对该用户不再出现。
 
-修改后需**重启 Gateway**，或调用 `POST /api/skills/reload`（需 admin 权限，见 4.3）。
-
-### 4.2 Skill 包结构
+**Skill 包最小结构：**
 
 ```
-skills/public/deep-research/
+my-skill/
 ├── SKILL.md          # 必需：YAML frontmatter + 指令正文
-├── scripts/          # 可选：辅助脚本
-└── references/       # 可选：参考文档
+├── scripts/          # 可选
+└── references/       # 可选
 ```
 
 `SKILL.md` frontmatter 示例：
@@ -518,30 +525,206 @@ skills/public/deep-research/
 ```yaml
 ---
 name: deep-research
-description: 需要系统性网络调研时使用此 skill。用户问「什么是 X」「调研 X」时触发。
+description: 需要系统性网络调研时使用。用户问「什么是 X」「调研 X」时触发。
 ---
 # Deep Research Skill
-（正文：方法论、步骤、注意事项）
+（正文：步骤、约束、示例）
 ```
 
-要点：
-- `name` 与目录名一致，全局唯一
-- `description` 决定 Agent **何时加载**该 Skill，务必写清触发条件
+- `name` 与目录名一致
+- `description` 决定 Agent **何时加载**，务必写清触发条件
 
-### 4.3 HTTP 管理接口
+---
 
-> **权限说明**：下列写操作（install / reload / PUT 启用禁用）需要 **admin 用户**（浏览器 Cookie 登录的管理员）。平台 Internal Token 集成通常通过**直接编辑 `extensions_config.json`** 或在部署流程中管理 Skill，读接口（GET）在 Internal Token 下一般可用。
+### 4.2 角色与权限（先看这张表）
 
-#### 4.3.1 列出所有 Skill — `GET /api/skills`
+| 能力 | 管理员（`system_role=admin`，浏览器登录） | 终端用户（普通登录用户） | 平台 Internal Token（如 `zhangsan`） |
+|------|------------------------------------------|--------------------------|--------------------------------------|
+| 查看 Skill 列表 | ✅ `GET /api/skills` | ✅ 设置页 + API | ✅ `GET /api/skills`（带 Owner 头） |
+| 启用/禁用 **public** Skill | ✅ UI 开关 / `PUT /api/skills/{name}` | ❌ UI 开关灰色不可用 | ❌ 403，需改配置文件或找管理员 |
+| 启用/禁用 **custom** Skill | ✅ | ❌（API 同样要求 admin） | ❌ |
+| 安装 `.skill` 包 | ✅ `POST /api/skills/install` | ❌ | ❌ |
+| 刷新 Skill 缓存 | ✅ `POST /api/skills/reload` | ❌ | ❌ |
+| 编辑/删除 custom Skill（HTTP） | ✅ `/api/skills/custom/*` | ❌ | ❌ |
+| **对话中使用**已启用的 Skill | ✅ 自动 | ✅ 自动 | ✅ 自动（run 时 Agent 加载） |
+| **创建 custom Skill**（对话 + Agent） | ✅ 需 `skill_evolution.enabled` | ✅ 同上 | ✅ 以 Owner 用户身份对话时可创建 |
+| 直接改 `extensions_config.json` | ✅ 运维 | ❌ | ❌（改服务器文件，非 API） |
 
-**请求头**
+> **重要**：`X-DeerFlow-Owner-User-Id: zhangsan` 只表示「以 zhangsan 的身份读写数据」，**不等于 admin**。admin 是 DeerFlow 账号体系里的管理员角色，与 Owner 头无关。
 
-| 参数 | 必填 | 说明 |
-|------|------|------|
-| `X-DeerFlow-Internal-Token` | 是 | Internal Token |
-| `X-DeerFlow-Owner-User-Id` | 建议 | 影响 custom Skill 的用户态视图 |
+---
 
-**示例**
+### 4.3 管理员：public Skill 运维
+
+#### 4.3.1 启用 / 禁用 public Skill
+
+**方式 A（推荐生产）：改配置文件 + 重启 Gateway**
+
+编辑服务器上的 `extensions_config.json`：
+
+```json
+{
+  "mcpServers": { },
+  "skills": {
+    "deep-research": {"enabled": true},
+    "frontend-design": {"enabled": false}
+  }
+}
+```
+
+保存后**重启 Gateway**（或滚动重启 Pod）。无需调 reload API。
+
+**方式 B：Admin 账号调 API**
+
+浏览器以 **admin** 登录 DeerFlow，带 Cookie + CSRF：
+
+```bash
+curl -sS -X PUT "${GATEWAY}/api/skills/deep-research" \
+  -H "Content-Type: application/json" \
+  -H "Cookie: <admin_session_cookie>" \
+  -H "X-CSRF-Token: <csrf_token>" \
+  -d '{"enabled": true}'
+```
+
+刷新缓存（可选，改磁盘上的 custom/public 文件后）：
+
+```bash
+curl -sS -X POST "${GATEWAY}/api/skills/reload" \
+  -H "Cookie: <admin_session_cookie>" \
+  -H "X-CSRF-Token: <csrf_token>"
+```
+
+#### 4.3.2 发布新的 public Skill
+
+1. 在部署包的 `skills/public/{name}/` 下添加 Skill 目录（含 `SKILL.md`）
+2. 在 `extensions_config.json` 的 `skills` 块增加 `"name": {"enabled": true}`
+3. 重启 Gateway
+4. `GET /api/skills` 确认出现且 `enabled: true`
+
+public Skill **不应**通过终端用户对话创建；应走发版 / 运维流程。
+
+#### 4.3.3 前置配置：允许用户创建 custom Skill
+
+若希望终端用户（或 Agent）能**创建** custom Skill，需在 `config.yaml` 开启：
+
+```yaml
+skill_evolution:
+  enabled: true
+  moderation_model_name: null   # Skill 安全扫描用的模型，null 用默认模型
+```
+
+开启后，Lead Agent 会获得 `skill_manage` 工具，可将 Skill 写入用户目录 `.deer-flow/users/{user_id}/skills/custom/`。默认 `enabled: false` 时用户只能**使用**已有 Skill，不能通过 Agent 新建。
+
+---
+
+### 4.4 终端用户：如何使用 Skill
+
+终端用户**不需要**在每条消息里写「请加载 deep-research」。流程如下：
+
+1. **管理员**已在 `extensions_config.json` 启用需要的 public Skill（如 `deep-research`）
+2. 用户在 DeerFlow **Web 聊天**或你们平台嵌入的对话框里正常提问
+3. Agent 根据各 Skill 的 `description` 与当前任务，自动决定是否调用 `load_skill` / 遵循 Skill 指令
+4. 用户可在 **设置 → Skills** 查看 public / custom 列表与说明（启用开关仅 admin 可操作）
+
+**使用 custom Skill：**
+
+- 用户通过下文 4.5 创建 custom Skill 后，**默认即为启用**（除非被全局或用户级状态关闭）
+- custom Skill **仅创建者**（对应 `user_id`）在对话中可见、可加载
+
+**在自定义 Agent 中限定 Skill 白名单**（平台 API，见第六章）：
+
+```json
+{
+  "name": "my-agent",
+  "skills": ["deep-research"],
+  "tool_groups": ["web"]
+}
+```
+
+`skills: []` 表示该 Agent 不使用任何 Skill；省略或 `null` 表示使用当前用户所有已启用的 Skill。
+
+---
+
+### 4.5 终端用户：如何创建 custom Skill
+
+有三种常见路径，按推荐顺序：
+
+#### 方式 1：Web UI「创建 Skill」引导（推荐）
+
+1. 登录 DeerFlow → **设置 → Skills**
+2. 点击 **「创建 Skill」**（进入 `/workspace/chats/new?mode=skill`）
+3. 在对话中描述需求，Agent 会使用内置 **skill-creator** 流程引导：定目标 → 写 `SKILL.md` 草稿 → 试跑 → 迭代
+4. 前提：`skill_evolution.enabled: true`，Agent 才能调用 `skill_manage` 持久化文件
+
+**不要**用普通 `write_file` 把 `SKILL.md` 写到 `/mnt/user-data/outputs/`——那样只对当前 Thread 可见，其他会话加载不到。必须通过 **`skill_manage`**（Agent 自动调用）写入用户 Skill 目录。
+
+`skill_manage` 常用动作：
+
+| action | 用途 |
+|--------|------|
+| `create` | 新建 Skill，传入完整 `SKILL.md` 内容 |
+| `edit` | 整文件替换 |
+| `patch` | 局部 find/replace |
+| `write_file` | 添加 `scripts/`、`references/` 等附属文件 |
+| `delete` | 删除整个 custom Skill |
+
+创建成功后 Skill 立即可用于该用户**后续所有新对话**（同 `user_id`）。
+
+#### 方式 2：平台 API 代用户对话创建
+
+你们的业务系统用 Internal Token + `X-DeerFlow-Owner-User-Id: zhangsan` 发起对话，消息示例：
+
+```json
+{
+  "input": {
+    "messages": [{
+      "role": "human",
+      "content": "帮我创建一个 Skill：名称 order-review，用于审查订单数据是否符合公司规范……"
+    }]
+  },
+  "context": { "is_bootstrap": false }
+}
+```
+
+同样需要服务端 `skill_evolution.enabled: true`。Agent 创建结果落在 `.deer-flow/users/zhangsan/skills/custom/order-review/`。
+
+#### 方式 3：Admin 安装 `.skill` 包
+
+1. 用户将 `.skill` 文件上传到某 Thread（`POST /api/threads/{id}/uploads`）
+2. **Admin** 调用：
+
+```json
+POST /api/skills/install
+{
+  "thread_id": "<thread_id>",
+  "path": "/mnt/user-data/uploads/my-skill.skill"
+}
+```
+
+安装到对应用户的 custom 目录（需 admin 权限）。适合运维统一分发，不适合普通终端用户自助。
+
+#### 方式 4：运维直接落盘（高级）
+
+将 Skill 目录复制到：
+
+```text
+.deer-flow/users/{user_id}/skills/custom/{skill_name}/SKILL.md
+```
+
+重启 Gateway 或 admin 执行 `POST /api/skills/reload`。适合批量迁移，一般不开放给业务用户。
+
+---
+
+### 4.6 HTTP 管理接口（按角色）
+
+#### 4.6.1 列出所有 Skill — `GET /api/skills`
+
+**权限**：Internal Token ✅｜终端用户 Cookie ✅｜Admin ✅
+
+| 请求头 | 必填 | 说明 |
+|--------|------|------|
+| `X-DeerFlow-Internal-Token` | Internal 调用时必填 | |
+| `X-DeerFlow-Owner-User-Id` | 建议 | 决定 custom / LEGACY Skill 的用户视图 |
 
 ```bash
 curl -sS "${GATEWAY}/api/skills" \
@@ -560,15 +743,23 @@ curl -sS "${GATEWAY}/api/skills" \
       "description": "...",
       "enabled": true,
       "license": "MIT",
-      "path": "public/deep-research"
+      "path": "public/deep-research",
+      "category": "public"
+    },
+    {
+      "name": "order-review",
+      "description": "...",
+      "enabled": true,
+      "path": "custom/order-review",
+      "category": "custom"
     }
   ]
 }
 ```
 
-#### 4.3.2 获取 Skill 详情 — `GET /api/skills/{skill_name}`
+#### 4.6.2 获取 Skill 详情 — `GET /api/skills/{skill_name}`
 
-返回单个 Skill 的 metadata 与 `SKILL.md` 内容摘要。
+**权限**：同上（只读）
 
 ```bash
 curl -sS "${GATEWAY}/api/skills/deep-research" \
@@ -576,54 +767,63 @@ curl -sS "${GATEWAY}/api/skills/deep-research" \
   -H "X-DeerFlow-Owner-User-Id: ${OWNER}"
 ```
 
-#### 4.3.3 启用 / 禁用 Skill — `PUT /api/skills/{skill_name}`
+#### 4.6.3 启用 / 禁用 — `PUT /api/skills/{skill_name}`
 
-**请求体**
+**权限：仅 admin**（Internal Token / 普通用户 → **403**）
 
-| 参数 | 必填 | 说明 |
-|------|------|------|
-| `enabled` | 是 | `true` 启用 / `false` 禁用 |
+| 请求体字段 | 必填 | 说明 |
+|------------|------|------|
+| `enabled` | 是 | `true` / `false` |
 
-- **public** Skill：写入全局 `extensions_config.json`，影响所有用户
-- **custom** Skill：写入用户级 `_skill_states.json`，按 `X-DeerFlow-Owner-User-Id` 隔离
+- **public**：写全局 `extensions_config.json`，影响所有用户
+- **custom**：写该用户目录下 `_skill_states.json`（admin 代操作时作用于 admin 登录用户，非 Owner 头用户）
 
-```bash
-curl -sS -X PUT "${GATEWAY}/api/skills/deep-research" \
-  -H "Content-Type: application/json" \
-  -H "Cookie: ..." \
-  -H "X-CSRF-Token: ..." \
-  -d '{"enabled": true}'
-```
+#### 4.6.4 安装 `.skill` 包 — `POST /api/skills/install`
 
-#### 4.3.4 安装 Skill 包 — `POST /api/skills/install`
+**权限：仅 admin**
 
-从 Thread 工作区内的 `.skill` 压缩包安装到 `skills/custom/`（需 admin）。
-
-**请求体**
-
-| 参数 | 必填 | 说明 |
-|------|------|------|
+| 请求体字段 | 必填 | 说明 |
+|------------|------|------|
 | `thread_id` | 是 | 含 `.skill` 文件的 Thread |
-| `path` | 是 | 虚拟路径，如 `/mnt/user-data/uploads/my-skill.skill` |
+| `path` | 是 | 虚拟路径，如 `/mnt/user-data/uploads/foo.skill` |
 
-#### 4.3.5 刷新 Skill 缓存 — `POST /api/skills/reload`
+#### 4.6.5 刷新缓存 — `POST /api/skills/reload`
 
-进程内使 Skill 缓存失效，后续 run 重新扫描磁盘（需 admin，进程级生效）。
+**权限：仅 admin**。进程内失效 Skill 提示词缓存；**不会**重新读取 `extensions_config.json`（改 public 开关仍需重启或走 PUT）。
 
-### 4.4 在对话 / 自定义 Agent 中使用
+#### 4.6.6 Custom Skill 编辑 API — `/api/skills/custom/*`
 
-| 方式 | 做法 |
-|------|------|
-| 全局启用 | `extensions_config.json` 中 `"enabled": true` |
-| 限定 Agent | 创建自定义 Agent 时 `"skills": ["deep-research"]` |
-| 运行时 | Agent 根据任务描述自动决定是否 `load_skill`；无需在每条消息里指定 |
+**权限：仅 admin**（供管理后台或运维脚本；终端用户应走对话 + `skill_manage`）
 
-### 4.5 业务集成建议
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/skills/custom` | 列出当前用户的 custom Skill（无需 admin） |
+| GET | `/api/skills/custom/{name}` | 读取 `SKILL.md` 全文 |
+| PUT | `/api/skills/custom/{name}` | 编辑内容（安全扫描） |
+| DELETE | `/api/skills/custom/{name}` | 删除 |
+| GET | `/api/skills/custom/{name}/history` | 变更历史 |
+| POST | `/api/skills/custom/{name}/rollback` | 回滚 |
 
-1. **public Skill**：运维在 `extensions_config.json` 统一开关，发版时随配置下发
-2. **custom Skill**：通过 `.skill` 包 + install API，或直接写入 `skills/custom/{name}/`
-3. 不要在 Skill 里重复实现 DeerFlow 内置文件工具已覆盖的能力
-4. 改完配置后重启 Gateway 或 reload，再发起新 run 验证
+---
+
+### 4.7 场景速查
+
+| 场景 | 谁来做 | 怎么做 |
+|------|--------|--------|
+| 全站开放「深度调研」能力 | 管理员 | `extensions_config.json` 启用 `deep-research` + 重启 |
+| 业务用户自建「订单审查」Skill | 终端用户 | UI「创建 Skill」或平台代发对话；需 `skill_evolution.enabled` |
+| 平台查询 zhangsan 有哪些 Skill | 平台集成 | `GET /api/skills` + Owner=`zhangsan` |
+| 平台帮用户开/关 public Skill | 管理员 | 改配置或 admin PUT；**不能**用 Internal Token 代替 |
+| 对话中自动用 Skill | 终端用户 / 平台 | 正常 `POST /api/runs/stream`，无需额外字段 |
+| 限制某 Agent 只用部分 Skill | 平台 | 创建 Agent 时设 `skills: ["deep-research"]` |
+
+### 4.8 注意事项
+
+1. public Skill 开关是**全局**的；终端用户不能自行打开未启用的 public Skill
+2. custom Skill **默认创建即启用**；关闭需 admin 调 API 或写 `_skill_states.json`
+3. 不要在 Skill 里重复实现 DeerFlow 内置文件工具（`read_file` / `write_file` 等）已覆盖的能力
+4. 创建 / 编辑 Skill 会经过安全扫描（SkillScan）；含恶意指令的可能被 block
+5. 改 `extensions_config.json` 后**重启 Gateway**；`/api/skills/reload` 只刷新缓存，不替代重启
 
 ---
 
