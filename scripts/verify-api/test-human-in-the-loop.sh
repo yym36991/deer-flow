@@ -13,7 +13,7 @@ cd "$ROOT"
 INTERNAL_TOKEN="${DEER_FLOW_INTERNAL_AUTH_TOKEN:-X-DeerFlow-Internal-Token-valid}"
 OWNER="${DEER_FLOW_OWNER_USER_ID:-zhangsan}"
 GATEWAY="${DEER_FLOW_GATEWAY_URL:-http://127.0.0.1:8001}"
-THREAD_ID="${THREAD_ID:-hitl-api-test-007}"
+THREAD_ID="${THREAD_ID:-hitl-api-test-009}"
 STEP1_OUT="${TMPDIR:-/tmp}/deerflow-hitl-step1.sse"
 STEP2_JSON="${TMPDIR:-/tmp}/deerflow-hitl-step2.json"
 

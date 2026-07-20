@@ -11,7 +11,7 @@
             "version": 1,
             "kind": "human_input_response",
             "source": "ask_clarification",
-           "request_id": "clarification:call_tZpujZ1OSM2BHYApTxX7jg",
+           "request_id": "clarification:call_pFBQn2BDSKywvl4Q69z2Vg",
             "response_kind": "option",
             "option_id": "option-2",
             "value": "测试环境"
@@ -28,7 +28,7 @@
   },
   "config": {
     "configurable": {
-      "thread_id": "hitl-api-test-007"
+      "thread_id": "hitl-api-test-009"
     }
   },
   "metadata": {

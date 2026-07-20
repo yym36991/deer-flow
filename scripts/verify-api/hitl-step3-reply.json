@@ -11,9 +11,8 @@
             "version": 1,
             "kind": "human_input_response",
             "source": "ask_clarification",
-           "request_id": "clarification:call_oDHaT50QQdGcBeuQ_MtcZQ",
-            "response_kind": "option",
-            "option_id": "option-2",
+           "request_id": "clarification:call_jFf7yQ21TmGJwTUcmiLoFQ",
+            "response_kind": "text",
             "value": "Windows"
           }
         }
@@ -28,7 +27,7 @@
   },
   "config": {
     "configurable": {
-      "thread_id": "hitl-api-test-007"
+      "thread_id": "hitl-api-test-009"
     }
   },
   "metadata": {

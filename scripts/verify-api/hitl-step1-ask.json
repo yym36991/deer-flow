@@ -4,7 +4,7 @@
     "messages": [
       {
         "role": "human",
-        "content": "我要把服务部署到服务器。在开始任何操作之前，如果你不确定目标环境，必须先调用 ask_clarification 向我确认：开发环境、测试环境还是生产环境。不要猜测。"
+        "content": "我要把服务部署到服务器。在开始任何操作之前，如果你不确定目标环境，必须先调用 ask_clarification 向我确认：开发环境、测试环境还是生产环境。不要猜测。确认环境后，若还缺服务器类型或部署方式，也必须分别单独 ask_clarification，不要一次问多项。"
       }
     ]
   },
@@ -16,7 +16,7 @@
   },
   "config": {
     "configurable": {
-      "thread_id": "hitl-api-test-007"
+      "thread_id": "hitl-api-test-009"
     }
   },
   "metadata": {

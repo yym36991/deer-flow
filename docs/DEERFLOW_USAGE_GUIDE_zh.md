@@ -1440,26 +1440,77 @@ curl -i -N -X POST "${GATEWAY}/api/runs/stream" \
 
 ## 七、人在回路 HITL（DeerFlow 内置实现）
 
-本章说明 **DeerFlow 产品自带** 的人在回路机制——不是泛指「让人确认一下」的业务模式，而是下面这条固定链路：
+本章说明 **DeerFlow 产品自带** 的人在回路（Human-in-the-Loop，HITL）机制——不是泛指「让人确认一下」的业务模式，而是下面这条固定链路：
 
 ```text
-ask_clarification（模型调用）
-  → ClarificationMiddleware 拦截
-  → run 结束，SSE 抛出 Formal 问题
-  → 用户 human_input_response 续跑
-  → 新 run 继续
+ask_clarification（Lead Agent 模型调用）
+  → ClarificationMiddleware 拦截（工具体不执行）
+  → 写入 ToolMessage，当前 run 结束
+  → SSE 抛出 pending 问题（artifact.human_input）
+  → 用户 human_input_response 续跑（新 run、同 thread）
+  → Agent 读历史继续推理
 ```
 
 ---
 
-### 7.1 DeerFlow 的人在回路是什么
+### 7.1 为什么需要人在回路
 
-**定义**：Agent 在执行过程中**主动认为**缺信息、有歧义或须用户确认时，调用内置工具 `ask_clarification`；DeerFlow **结束当前 run**，把结构化问题交给用户；用户作答后，用 `human_input_response` **再 POST 一次**续跑。
+#### 7.1.1 场景一：长任务中途需要确认，但不能丢状态
 
-| 参与方 | 职责 |
-|--------|------|
-| **用户**（`X-DeerFlow-Owner-User-Id`） | 发任务；从 SSE 看到 Agent 的问题；选择/输入；POST 续跑 |
-| **DeerFlow** | 拦截 `ask_clarification`、写 `ToolMessage`、结束 run；收到续跑后继续推理 |
+智能体可能正在执行一条长达数分钟甚至十分钟的流水线，例如：
+
+```text
+抓取 20 个网页 → 写代码分析 → Sandbox 跑图表 → 生成报告
+```
+
+执行到第 3 步时发现数据格式不对、或部署目标不明确，需要用户确认。**此时不能当作任务已完成（Finish）**，也不能让用户「重新开一个新 Thread 从头跑」——中间已抓取的网页、Sandbox 里生成的文件、Thread 上的 workspace 路径都应保留。
+
+DeerFlow HITL 的产品语义是 **中断（Interrupt）→ 恢复（Resume）**：
+
+| 层面 | DeerFlow 实际行为 |
+|------|-------------------|
+| **对用户** | run 暂停在「待澄清」；用户作答后续跑，Agent 从同一 Thread 继续 |
+| **对实现** | 不是同一条 run 内 LangGraph `interrupt()` 挂起；而是 **当前 run 正常结束** + **同 `thread_id` 再 POST 一次** |
+| **状态保留** | Thread checkpoint 持久化：`messages` 全历史、`thread_data`（workspace/uploads/outputs 路径）、Sandbox 绑定等；续跑后模型从对话历史读回上下文 |
+
+因此：**HITL 结束的是 run，不是 Thread。** 只要续跑时仍用同一 Owner + 同一 `thread_id`，中间状态不会因「等用户输入」而销毁。
+
+#### 7.1.2 场景二：子 Agent 无法直接向用户提问
+
+子智能体（Sub-Agent）**没有**向用户发起 Formal 澄清的权限：内置 Sub-Agent（如 `general_purpose`、`bash_agent`）的工具集 **显式禁用** `ask_clarification`。
+
+典型链路是：
+
+```text
+Lead 委派 Sub-Agent 执行子任务
+  → Sub-Agent 发现信息不足，在结果里说明「需要用户确认 X」
+  → 控制权回到 Lead Agent
+  → Lead 调用 ask_clarification 向用户提问
+  → ClarificationMiddleware 结束 run，等待用户续跑
+```
+
+集成方只需对接 **Lead Agent 抛出的 `ask_clarification`**；不必也无需解析 Sub-Agent 内部的「能不能问用户」——Sub-Agent 问不了，最终一定由 Lead 统一发问。
+
+#### 7.1.3 适用与不适用
+
+| 项 | 说明 |
+|----|------|
+| **适用** | 对话式补信息：缺参数、方案二选一、部署环境/系统类型、危险操作确认等 |
+| **谁触发停止** | **模型**决定调用 `ask_clarification`（可在 SOUL/Skill 写「不确定必须先问」，属软约束） |
+| **用户要做** | 监听 SSE（或 `GET .../state`）→ 发现 `human_input_request` → 作答 POST 续跑 |
+| **Thread** | 全程同一 `thread_id` + 同一 Owner |
+| **不适用** | 「无论模型问不问，都必须在某业务节点硬停」——须在业务层拆 run 或限制工具，不能单靠 HITL 保证 |
+
+---
+
+### 7.2 DeerFlow 的人在回路是什么
+
+**定义**：Agent 在执行过程中识别到需要用户输入时，调用内置工具 `ask_clarification`；DeerFlow **结束当前 run**，把结构化问题交给用户；用户作答后，用 `human_input_response` **再 POST 一次**开启新 run 继续。
+
+| 参与方 | 是谁 | 做什么 |
+|--------|------|--------|
+| **用户（Owner）** | `X-DeerFlow-Owner-User-Id`（如 `zhangsan`） | 发任务、看 Agent 提出的问题、选择或输入答案、发起续跑请求 |
+| **DeerFlow** | Gateway + Agent | 调用 `ask_clarification` 后暂停 run；收到 `human_input_response` 后继续推理 |
 
 **和普通多轮对话的区别**（最容易混）：
 
@@ -1470,55 +1521,78 @@ ask_clarification（模型调用）
 | **程序要解析什么** | 一般只读 `content` | 须读 SSE 里 `artifact.human_input`（选项、`request_id`） |
 | **典型目的** | 闲聊、改需求、补充说明 | Agent **缺关键信息或须确认** 才能继续 |
 
-两者共用同一 **`thread_id`**（Thread 上下文）：历史消息都会留给下次 run。HITL 多出来的，是 **Agent 发起的 Formal 提问 + 结构化续跑协议**。
+两者共用同一 **`thread_id`**。HITL 多出来的，是 **Agent 发起的 Formal 提问 + 结构化续跑协议**。
 
 **续跑请求头**（与 §2 发任务相同）：
 
-| 参数 | 必填 |
-|------|------|
-| `X-DeerFlow-Internal-Token` | 是 |
-| `X-DeerFlow-Owner-User-Id` | 是（须与 Thread 首聊同一用户） |
+| 参数 | 必填 | 说明 |
+|------|------|------|
+| `Content-Type` | 是 | `application/json` |
+| `Accept` | 建议 | `text/event-stream` |
+| `X-DeerFlow-Internal-Token` | 是 | Internal Token |
+| `X-DeerFlow-Owner-User-Id` | 是 | 须与 Thread 首聊时同一用户 |
 
 ---
 
-### 7.2 实现机制：三个组件
+### 7.3 实现机制：三个组件
 
-#### 7.2.1 时序（一轮）
+#### 7.3.1 一次 HITL 轮次的生命周期
 
 ```text
-① 用户 POST 发任务
-② 模型推理后，在 tool_calls 里调用 ask_clarification（参数：question、clarification_type、可选 options）
-③ 进入工具节点 → ClarificationMiddleware 发现 name=ask_clarification，在工具函数执行前拦截
-④ 写入 ToolMessage，goto END → 当前 run 结束（SSE 出现 event: end）
-⑤ 用户从 SSE 解析 artifact.human_input（含 request_id、options）
-⑥ 用户 POST 续跑：human_input_response 绑定 request_id
-⑦ 新 run：Agent 读 Thread 历史（含问题与用户答案），继续推理；可能再次 ask_clarification
+用户发任务 (POST /api/runs/stream)
+    → 模型调用 ask_clarification 工具
+    → ClarificationMiddleware 在 ask_clarification 真正执行之前拦截（工具函数体不会跑）
+    → 写入一条 ToolMessage 并 goto END → 当前 run 结束
+    → SSE 最后一条 values: messages 末尾是 ask_clarification 的 ToolMessage（含 pending 问题）
+
+用户看到问题 → 选择/输入答案
+    → 用户 POST /api/runs/stream（同一 thread_id + Owner）
+    → 消息带 hide_from_ui + human_input_response
+    → Agent 读取答案，继续推理（可能再次 ask_clarification → 下一轮）
 ```
 
-**要点**：不是「同 run 内挂起」；续跑永远是**新 run、同 thread**。
+**要点**：
 
-#### 7.2.2 三个组件
+- `ask_clarification` 是 **模型发起** 的 tool_call，不是 Gateway 自动插入。
+- 若模型本轮还规划了别的工具，**那些也不会执行**——澄清优先，整轮结束。
+- 续跑永远是 **新 run、同 thread**（SSE 会出现新的 `run_id`）。
 
-| 组件 | 作用 |
-|------|------|
-| **`ask_clarification` 工具** | 模型发起的 tool_call；工具体是占位实现，真实逻辑在中间件 |
-| **`ClarificationMiddleware`** | 仅拦截该工具；生成 `ToolMessage`；**结束 run**（本轮规划的其他工具也不会执行） |
-| **续跑消息** | `human_input_response` 把用户答案绑到 `request_id` |
+#### 7.3.2 三个组件
 
-#### 7.2.3 ToolMessage 的两层数据
+| 组件 | 干什么 | 说明 |
+|------|--------|------|
+| **`ask_clarification` 工具** | 大模型发起的一次 tool_call | 参数含 `question`、`clarification_type`、可选 `options` |
+| **`ClarificationMiddleware`** | 在工具节点上、仅针对 `ask_clarification`、在工具执行前拦截 | 不调用真实实现；写入 `ToolMessage` 并结束 run |
+| **续跑消息** | 用户下一次 POST 里的一条 human 消息 | `additional_kwargs.human_input_response` 绑定上一步的 `request_id`；`hide_from_ui: true` 表示结构化续跑 |
 
-| 字段 | 用途 |
-|------|------|
-| **`content`** | 给人看的格式化问题（含图标、选项列表）；也会进入对话历史供模型阅读 |
-| **`artifact.human_input`** | 给程序解析：`request_id`（`clarification:{tool_call_id}`）、`question`、`options[].id/value`、`input_mode` |
+#### 7.3.3 ToolMessage：`content` 与 `artifact`
+
+拦截成功后，Thread 里追加 `type: "tool"`, `name: "ask_clarification"` 的消息：
+
+| 字段 | 给谁看 | 内容 |
+|------|--------|------|
+| **`content`** | 人 + 模型 | 格式化可读文案，如 `🔀 我需要知道目标环境…` + 选项列表；续跑后模型也从历史读这段 |
+| **`artifact.human_input`** | 程序 / 解析 SSE | 结构化 `human_input_request`：`request_id`、`question`、`options`（含 `option-1`…）、`input_mode` 等 |
+
+#### 7.3.4 关键字段对应关系
+
+| SSE / 请求字段 | 说明 |
+|----------------|------|
+| `artifact.human_input.request_id` | 固定格式 `clarification:{tool_call_id}`；续跑时必须原样回填 |
+| `human_input_response.request_id` | 必须等于 pending 问题的 `request_id`；新一轮提问会换新 ID |
+| `human_input_response.value` | 用户答案；须与 `messages[0].content` 语义一致（模型主要读 `content`） |
+| `human_input_response.option_id` | 前端展示的可选项 ID；对应 SSE 里 `options[n].id`（`option-1`、`option-2`…）；实际推理仍读 `value` |
+| `artifact.human_input.tool_call_id` | 解析 `request_id` 时可用；**不要**与 `option-1` 混淆 |
+
+**判定 pending**：从 messages 末尾向前找最后一条 `ask_clarification` 的 `request_id`；若尚未被某条 `human_input_response` 回复，即为 pending。
 
 ---
 
-### 7.3 使用场景（按 `clarification_type`）
+### 7.4 使用场景（按 `clarification_type`）
 
 模型调用 `ask_clarification` 时必须带 `clarification_type`。五类场景如下——也是写使用说明、对接 UI 时的主要依据。
 
-#### 7.3.1 `missing_info` — 缺关键信息
+#### 7.4.1 `missing_info` — 缺关键信息
 
 | 项 | 说明 |
 |----|------|
@@ -1532,7 +1606,7 @@ ask_clarification（模型调用）
 - Agent：`ask_clarification` —「目标环境是开发、测试还是生产？」（`options` 三项）
 - 用户选「测试环境」→ `human_input_response` 续跑 → Agent 继续问服务器类型或开始部署步骤。
 
-#### 7.3.2 `ambiguous_requirement` — 需求歧义
+#### 7.4.2 `ambiguous_requirement` — 需求歧义
 
 | 项 | 说明 |
 |----|------|
@@ -1545,7 +1619,7 @@ ask_clarification（模型调用）
 - Agent：「您指的是哪台机器上的哪个服务？」（可能带 `[Web-1 / Web-2 / 全部]`）
 - 用户选定后续跑，Agent 按指定目标执行。
 
-#### 7.3.3 `approach_choice` — 方案选择
+#### 7.4.3 `approach_choice` — 方案选择
 
 | 项 | 说明 |
 |----|------|
@@ -1559,7 +1633,7 @@ ask_clarification（模型调用）
 - Agent：「优先优化数据库查询，还是加缓存？」（`approach_choice`）
 - 用户选「加缓存」→ Agent 按该方向调用工具。
 
-#### 7.3.4 `risk_confirmation` — 危险操作确认
+#### 7.4.4 `risk_confirmation` — 危险操作确认
 
 | 项 | 说明 |
 |----|------|
@@ -1573,7 +1647,7 @@ ask_clarification（模型调用）
 - Agent：「将删除约 120 个文件，是否继续？」（`risk_confirmation`）
 - 用户选「取消」→ 续跑后 Agent 不应执行删除。
 
-#### 7.3.5 `suggestion` — 建议须用户采纳
+#### 7.4.5 `suggestion` — 建议须用户采纳
 
 | 项 | 说明 |
 |----|------|
@@ -1585,7 +1659,7 @@ ask_clarification（模型调用）
 - Agent：「检测到测试未通过，建议先跳过部署直接回滚。是否采纳？」（`suggestion`）
 - 用户选「先跑完测试再决定」→ Agent 调整后续步骤。
 
-#### 7.3.6 场景汇总
+#### 7.4.6 场景汇总
 
 | clarification_type | 典型问题 | 用户操作 | 是否常有 options |
 |--------------------|----------|----------|------------------|
@@ -1599,7 +1673,7 @@ ask_clarification（模型调用）
 
 ---
 
-### 7.4 用户侧集成流程
+### 7.5 用户侧集成流程
 
 ```text
 POST 发任务
@@ -1618,7 +1692,7 @@ POST 发任务
 
 ---
 
-### 7.5 API 走查示例（部署环境确认）
+### 7.6 API 走查：单轮澄清（部署环境）
 
 仓库内可复现：`scripts/verify-api/hitl-step1-ask.json`、`hitl-step2-reply.json`。
 
@@ -1626,6 +1700,7 @@ POST 发任务
 export GATEWAY="http://127.0.0.1:8001"
 export INTERNAL_TOKEN="X-DeerFlow-Internal-Token-valid"
 export OWNER="zhangsan"
+export THREAD_ID="hitl-api-test-009"
 
 # Step 1：发任务，触发 ask_clarification
 curl -N -X POST "${GATEWAY}/api/runs/stream" \
@@ -1635,9 +1710,10 @@ curl -N -X POST "${GATEWAY}/api/runs/stream" \
   -H "X-DeerFlow-Owner-User-Id: ${OWNER}" \
   -d @scripts/verify-api/hitl-step1-ask.json | tee /tmp/hitl-step1.sse
 
-# 从 SSE 取 request_id = clarification:{tool_call_id}
+# 从 SSE 最后一条 values 里取 artifact.human_input.request_id
+# 格式：clarification:{tool_call_id}
 
-# Step 2：用户选「测试环境」续跑
+# Step 2：用户选「测试环境」续跑（request_id 须替换为 Step 1 实际值）
 curl -N -X POST "${GATEWAY}/api/runs/stream" \
   -H "Content-Type: application/json" \
   -H "Accept: text/event-stream" \
@@ -1661,7 +1737,7 @@ curl -N -X POST "${GATEWAY}/api/runs/stream" \
           "version": 1,
           "kind": "human_input_response",
           "source": "ask_clarification",
-          "request_id": "clarification:call_xxx",
+          "request_id": "clarification:call_pFBQn2BDSKywvl4Q69z2Vg",
           "response_kind": "option",
           "option_id": "option-2",
           "value": "测试环境"
@@ -1669,25 +1745,136 @@ curl -N -X POST "${GATEWAY}/api/runs/stream" \
       }
     }]
   },
-  "config": {"configurable": {"thread_id": "hitl-api-test-007"}}
+  "config": {"configurable": {"thread_id": "hitl-api-test-009"}}
 }
 ```
 
-一键脚本：`bash scripts/verify-api/test-human-in-the-loop.sh`
+一键单轮脚本（自动从 Step 1 SSE 提取 `tool_call_id` 并生成 Step 2）：
+
+```bash
+bash scripts/verify-api/test-human-in-the-loop.sh
+```
 
 ---
 
-### 7.6 能力与限制
+### 7.7 API 走查：同 Thread 多轮澄清（实操）
+
+同一 Thread 内，Agent 可 **连续多轮** `ask_clarification`：先问环境 → 再问服务器类型 → 再问部署方式。每轮 **run 结束一次**；用户 **每答一次 POST 一次**；全程 **`thread_id` 不变**。
+
+#### 7.7.1 实测流程（`thread_id = hitl-api-test-009`）
+
+以下为本仓库在 Gateway `http://127.0.0.1:8001`、Owner `zhangsan` 上的 **真实走查结果**（模型行为可能因 prompt/模型略有差异，但 HITL 协议字段稳定）：
+
+| 轮次 | 用户动作 | Agent 提问（`question`） | `request_id`（示例） | 用户答案 |
+|------|----------|--------------------------|----------------------|----------|
+| 1 | POST 发任务（`hitl-step1-ask.json`） | 您希望将服务部署到哪个环境？ | `clarification:call_pFBQn2BDSKywvl4Q69z2Vg` | 测试环境（`option-2`） |
+| 2 | POST 续跑 | 您使用的是哪种类型的服务器？ | `clarification:call_jFf7yQ21TmGJwTUcmiLoFQ` | Windows（自由文本） |
+| 3 | POST 续跑 | 您希望使用哪种部署方式？ | `clarification:call_C8E6YWwzSgyoiJGux8VtWw` | 手动部署（`option-1`） |
+| 4 | — | 无新 pending；Agent 输出部署步骤摘要 | — | — |
+
+**第 1 轮 SSE 中 `artifact.human_input` 示例**（节选）：
+
+```json
+{
+  "version": 1,
+  "kind": "human_input_request",
+  "source": "ask_clarification",
+  "request_id": "clarification:call_pFBQn2BDSKywvl4Q69z2Vg",
+  "clarification_type": "missing_info",
+  "question": "您希望将服务部署到哪个环境？",
+  "input_mode": "choice_with_other",
+  "options": [
+    {"id": "option-1", "label": "开发环境", "value": "开发环境"},
+    {"id": "option-2", "label": "测试环境", "value": "测试环境"},
+    {"id": "option-3", "label": "生产环境", "value": "生产环境"}
+  ]
+}
+```
+
+**第 2 轮续跑 JSON 模板**（每轮仅改 `request_id`、`content`、`value`、`option_id`）：
+
+```json
+{
+  "assistant_id": "lead_agent",
+  "input": {
+    "messages": [{
+      "role": "human",
+      "content": "Windows",
+      "additional_kwargs": {
+        "hide_from_ui": true,
+        "human_input_response": {
+          "version": 1,
+          "kind": "human_input_response",
+          "source": "ask_clarification",
+          "request_id": "clarification:call_jFf7yQ21TmGJwTUcmiLoFQ",
+          "response_kind": "text",
+          "value": "Windows"
+        }
+      }
+    }]
+  },
+  "config": {"configurable": {"thread_id": "hitl-api-test-009"}}
+}
+```
+
+#### 7.7.2 集成侧循环伪代码
+
+```python
+thread_id = "hitl-api-test-009"
+sse = post_run_stream(initial_task_body)
+
+while True:
+    pending = find_unanswered_ask_clarification(sse)  # 读最后 values.messages
+    if not pending:
+        break  # run 正常结束
+    show_ui(pending["question"], pending.get("options"))
+    answer = wait_user_input()
+    body = build_human_input_response(
+        thread_id=thread_id,
+        request_id=pending["request_id"],
+        value=answer.text,
+        option_id=answer.option_id,  # 可选
+    )
+    sse = post_run_stream(body)
+```
+
+也可用 `GET /api/threads/{thread_id}/state` 代替解析 SSE 判定 pending（逻辑相同：对比 `ask_clarification.request_id` 与已回复的 `human_input_response.request_id`）。
+
+#### 7.7.3 一键多轮脚本
+
+```bash
+# 默认 thread：hitl-api-test-009；自动 Step1 → 答环境 → 答 OS → 答部署方式
+bash scripts/verify-api/test-human-in-the-loop-multi.sh
+
+# 指定 Thread
+THREAD_ID=my-hitl-thread bash scripts/verify-api/test-human-in-the-loop-multi.sh
+```
+
+脚本会打印每轮 `request_id` 与下一轮问题；SSE 落盘 `/tmp/hitl-multi-step*.sse` 便于对照文档字段。
+
+#### 7.7.4 时序总览
+
+```text
+用户发任务 → Agent ask_clarification → run 结束
+    → 用户看 SSE、作答 → POST 续跑
+    → Agent 继续（可能再问 → 再答 → 再续跑 …）
+    → 无 pending → 任务继续或结束
+```
+
+---
+
+### 7.8 能力与限制
 
 | 能力 | 说明 |
 |------|------|
 | **支持** | 同 Thread 多轮 `ask_clarification`；选择题 + 自由文本；`GET /api/threads/{id}/state` 轮询 pending |
-| **Lead Agent** | 默认带 `ask_clarification`；子 Agent 通常**不带**（避免嵌套澄清） |
+| **Lead Agent** | 默认带 `ask_clarification`；Sub-Agent **禁用**该工具（见 §7.1.2） |
 | **谁决定要不要问** | **模型**；可在 SOUL/Skill 里写「不确定必须先 ask_clarification」，属软约束 |
-| **非交互 run** | 定时任务、`context.non_interactive=true`（仅内部调用）等路径会**禁用** `ask_clarification`，Agent 须自行推断继续 |
-| **不适用** | 需要「无论模型问不问，都必须停在某业务节点」的硬编排——须在业务层拆 run 或限制工具，不能单靠本章机制保证 |
+| **非交互 run** | 定时任务、`context.non_interactive=true`（仅内部调用）等路径会 **禁用** `ask_clarification` |
+| **状态保留** | HITL 结束 run 但不销毁 Thread：messages、`thread_data`、Sandbox 绑定在续跑时仍可用 |
+| **不适用** | 需要「无论模型问不问，都必须停在某业务节点」的硬编排——须在业务层拆 run 或限制工具 |
 
-**续跑注意**：`content` 与 `value` 语义一致；`request_id` 必须对应当前 pending；解析 `tool_call_id` 取 `artifact.human_input.tool_call_id`，勿与 `option-1` 混淆。
+**续跑注意**：`content` 与 `value` 语义一致；`request_id` 必须对应当前 pending；解析 `tool_call_id` 取 `artifact.human_input.tool_call_id`，勿与 `option-1` 混淆；**同一 Thread 若混有未回复的旧 pending，会导致判定混乱**——联调时建议每次用新 `thread_id` 或先 `GET .../state` 核对已答列表。
 
 ---
 

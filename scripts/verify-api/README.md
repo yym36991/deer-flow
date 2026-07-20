@@ -239,3 +239,35 @@ bash scripts/verify-api/test-skill-install.sh --admin-self
 
 状态文件：`.deer-flow/verify-api/skill-install.state.json`（含 `thread_id`、`virtual_path`）。
 
+---
+
+## 人在回路 HITL（ask_clarification）
+
+对应文档：`docs/DEERFLOW_USAGE_GUIDE_zh.md` §7。
+
+**前置**：Gateway 已启动（`bash scripts/verify-api/start-gateway.sh`）。
+
+```bash
+export GATEWAY=http://127.0.0.1:8001
+export INTERNAL_TOKEN=X-DeerFlow-Internal-Token-valid
+export OWNER=zhangsan
+```
+
+| 文件 / 脚本 | 说明 |
+|-------------|------|
+| `hitl-step1-ask.json` | 发部署任务，触发 `ask_clarification`（`thread_id`: `hitl-api-test-009`） |
+| `hitl-step2-reply.json` | 单轮续跑示例：选「测试环境」（`request_id` 须与 Step1 SSE 一致） |
+| `hitl-step3-reply.json` | 第二轮续跑示例：答「Windows」 |
+| `test-human-in-the-loop.sh` | 单轮：Step1 → 自动解析 SSE → Step2 |
+| `test-human-in-the-loop-multi.sh` | 多轮：环境 → 服务器类型 → 部署方式（自动循环） |
+
+```bash
+# 单轮
+bash scripts/verify-api/test-human-in-the-loop.sh
+
+# 多轮（建议每次换新 thread_id，避免旧 pending 干扰）
+THREAD_ID=hitl-api-test-$(date +%s) bash scripts/verify-api/test-human-in-the-loop-multi.sh
+```
+
+从 SSE 或 `GET /api/threads/{thread_id}/state` 读取 `artifact.human_input.request_id`，续跑时填入 `human_input_response.request_id`（格式 `clarification:{tool_call_id}`）。
+
