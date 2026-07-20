@@ -941,7 +941,7 @@ curl -sS "${GATEWAY}/api/skills/custom" \
 
 MCP（Model Context Protocol）用于挂载外部工具服务：GitHub、PostgreSQL、企业内部 HTTP API 等。配置后 Agent 在对话中自动发现 MCP 工具；模型侧工具名带 **`{server}_` 前缀**（如 `github_create_issue`）。
 
-### 5.0 角色分工（本部署）
+### 5.1 角色分工（本部署）
 
 | 角色 | 职责 |
 |------|------|
@@ -950,158 +950,103 @@ MCP（Model Context Protocol）用于挂载外部工具服务：GitHub、Postgre
 
 **重要**：MCP 是 **全站全局** 配置，**不按 Owner 隔离**。`zhangsan`、`lisi` 等同一次 run 里看到的 MCP 工具集相同；差异来自 Skill、Agent、Thread 等 Owner 级资源（见 **§4**、**§6**）。
 
-### 5.1 配置文件
+### 5.2 配置文件
 
-根目录 `extensions_config.json` → `mcpServers`：
+根目录 `extensions_config.json` → `mcpServers`。下列为 **stdio + 远程** 典型写法合集；**生产环境通常只启用需要的 server**（其余保持 `"enabled": false`）。
 
 ```json
 {
   "mcpServers": {
     "github": {
-      "enabled": true,
+      "enabled": false,
       "type": "stdio",
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-github"],
       "env": {"GITHUB_TOKEN": "$GITHUB_TOKEN"},
       "tool_call_timeout": 60,
-      "description": "GitHub 仓库操作"
+      "description": "GitHub 仓库操作（需 Gateway 环境 export GITHUB_TOKEN）"
     },
     "postgres": {
-      "enabled": true,
+      "enabled": false,
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-postgres", "postgresql://localhost/mydb"],
+      "args": ["-y", "@modelcontextprotocol/server-postgres", "postgresql://user:pass@127.0.0.1:5432/mydb"],
       "routing": {
         "mode": "prefer",
         "priority": 50,
         "keywords": ["数据库", "SQL", "订单", "用户"]
-      }
+      },
+      "description": "PostgreSQL（Gateway 宿主机 Postgres 须已监听）"
+    },
+    "sqlite-local": {
+      "enabled": false,
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["mcp-server-sqlite", "--db-path", "/data/demo/app.db"],
+      "tool_call_timeout": 60,
+      "description": "本地 SQLite 文件库（--db-path 为 Gateway 可访问绝对路径）"
+    },
+    "everything-demo": {
+      "enabled": true,
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-everything"],
+      "tool_call_timeout": 30,
+      "description": "MCP 官方测试 server（无需密钥，验证 stdio 链路）"
+    },
+    "corp-api": {
+      "enabled": false,
+      "type": "http",
+      "url": "https://mcp.corp.example.com/v1",
+      "oauth": {
+        "enabled": true,
+        "token_url": "https://auth.corp.example.com/oauth/token",
+        "grant_type": "client_credentials",
+        "client_id": "$MCP_OAUTH_CLIENT_ID",
+        "client_secret": "$MCP_OAUTH_CLIENT_SECRET",
+        "scope": "mcp.read"
+      },
+      "description": "远程 HTTP MCP + OAuth（企业统一网关）"
+    },
+    "internal-search": {
+      "enabled": false,
+      "type": "sse",
+      "url": "https://mcp-internal.corp.example.com/sse",
+      "headers": {"X-Api-Key": "$INTERNAL_MCP_API_KEY"},
+      "description": "远程 SSE MCP（内网托管）"
     }
   },
   "skills": {}
 }
 ```
 
+| `mcpServers` 键 | 类型 | 说明 |
+|-----------------|------|------|
+| `github` | stdio + `npx` | 读/写 GitHub；模型侧工具名如 `github_create_issue` |
+| `postgres` | stdio + `npx` | 查本机/内网 Postgres；`args` 末尾为连接串 |
+| `sqlite-local` | stdio + `uvx` | 轻量 SQLite；等价于 `uvx mcp-server-sqlite --db-path …` |
+| `everything-demo` | stdio + `npx` | **冒烟推荐**；等价于 `npx -y @modelcontextprotocol/server-everything` |
+| `corp-api` | `http` + `oauth` | 连企业 HTTP MCP；密钥用 `$VAR` |
+| `internal-search` | `sse` + `headers` | 连内网 SSE MCP 端点 |
+
 - 环境变量用 **`$VAR`** 引用，**不要**在 JSON 里明文写密钥。
-- `"enabled": false` 的 server **不会**加载；改配置后需重启 Gateway，或 admin 调 `POST /api/mcp/cache/reset`（仅清当前进程缓存，**不替代**改文件 + 重启的常规流程）。
+- `"enabled": false` 的 server **不会**加载。
+- 改配置后需 **重启 Gateway**，或 admin **`PUT /api/mcp/config`**（见 **§5.8.2**）热加载。
+- admin **`POST /api/mcp/cache/reset`** 仅清当前进程 MCP **工具缓存**，**不会**重新读磁盘上的 `extensions_config.json`。
 
-### 5.2 本地 stdio vs 远程 sse/http：怎么选
+### 5.3 本地 stdio vs 远程 sse/http：怎么选
 
-| 维度 | **本地 stdio**（`type: "stdio"` + `command`） | **远程 sse / http**（`type: "sse"|"http"` + `url`） |
-|------|-----------------------------------------------|-----------------------------------------------------|
+| 维度 | **本地 stdio**（`type: "stdio"` + `command`） | **远程 sse / http**（`type: "sse"` \| `"http"` + `url`） |
+|------|-----------------------------------------------|--------------------------------------------------------|
 | **进程在哪跑** | Gateway **同一台机器**上由 DeerFlow **拉起子进程** | Gateway **连外部 URL**，不本地起包 |
 | **典型包/服务** | npm 的 `npx …`、Python 的 `uvx …` | 企业已部署的 MCP Gateway、SaaS MCP 端点 |
 | **网络** | 多数只需访问本机 DB/文件；拉包时可能要外网 npm/PyPI | 必须 Gateway 能访问 `url`（内网/VPN/公网） |
 | **密钥放哪** | `env` 里 `$VAR`，由 Gateway **进程环境**注入子进程 | 常配 `oauth` 或 `headers`；密钥仍在环境变量 |
 | **适合** | 官方 MCP 包、连本机 Postgres/SQLite、GitHub 类工具 | 统一托管、多租户、已有 HTTP MCP 服务、不想在 Gateway 装 Node/Python |
 
-**一句话**：有现成 **npm/PyPI MCP 包**、数据/服务在 Gateway 本机或可直连 → 用 **stdio**；已有团队维护的 **HTTP/SSE MCP 服务** → 用 **远程**。
+有现成 **npm/PyPI MCP 包**、数据/服务在 Gateway 本机或可直连 → 用 **stdio**；已有团队维护的 **HTTP/SSE MCP 服务** → 用 **远程**。具体 JSON 字段见 **§5.2** 各 server 块。
 
-#### 5.2.1 示例 A — 本地 stdio + `npx`（GitHub，需 Token）
-
-场景：Agent 读/写 GitHub 仓库。Gateway 能跑 Node，且配置了 `GITHUB_TOKEN`。
-
-```json
-"github": {
-  "enabled": true,
-  "type": "stdio",
-  "command": "npx",
-  "args": ["-y", "@modelcontextprotocol/server-github"],
-  "env": {"GITHUB_TOKEN": "$GITHUB_TOKEN"},
-  "tool_call_timeout": 60,
-  "description": "GitHub 仓库操作"
-}
-```
-
-运维：`export GITHUB_TOKEN=ghp_xxx`。模型侧工具名形如 `github_create_issue`。
-
-#### 5.2.2 示例 B — 本地 stdio + `npx`（PostgreSQL，连本机库）
-
-场景：查内网 Postgres；连接串写在 `args` 末尾。
-
-```json
-"postgres": {
-  "enabled": true,
-  "type": "stdio",
-  "command": "npx",
-  "args": ["-y", "@modelcontextprotocol/server-postgres", "postgresql://user:pass@127.0.0.1:5432/mydb"],
-  "routing": {
-    "mode": "prefer",
-    "priority": 50,
-    "keywords": ["SQL", "订单表", "查库"]
-  },
-  "description": "PostgreSQL"
-}
-```
-
-前提：Gateway 宿主机上 Postgres **已监听**且连接串正确。
-
-#### 5.2.3 示例 C — 本地 stdio + `uvx`（SQLite 文件库）
-
-场景：轻量本地表，用 Python 生态 MCP。
-
-```json
-"sqlite-local": {
-  "enabled": true,
-  "type": "stdio",
-  "command": "uvx",
-  "args": ["mcp-server-sqlite", "--db-path", "/data/demo/app.db"],
-  "tool_call_timeout": 60,
-  "description": "本地 SQLite"
-}
-```
-
-`--db-path` 必须是 Gateway 进程能访问的**绝对路径**。
-
-#### 5.2.4 示例 D — 本地 stdio 冒烟（`server-everything`，无需密钥）
-
-场景：**第一次验证** DeerFlow ↔ MCP stdio 链路；不连真实外部系统。
-
-```json
-"everything-demo": {
-  "enabled": true,
-  "type": "stdio",
-  "command": "npx",
-  "args": ["-y", "@modelcontextprotocol/server-everything"],
-  "tool_call_timeout": 30,
-  "description": "MCP 官方测试 server"
-}
-```
-
-等价于 shell 执行：`npx -y @modelcontextprotocol/server-everything`。
-
-#### 5.2.5 示例 E — 远程 `http` + OAuth（企业 API）
-
-```json
-"corp-api": {
-  "enabled": true,
-  "type": "http",
-  "url": "https://mcp.corp.example.com/v1",
-  "oauth": {
-    "enabled": true,
-    "token_url": "https://auth.corp.example.com/oauth/token",
-    "grant_type": "client_credentials",
-    "client_id": "$MCP_OAUTH_CLIENT_ID",
-    "client_secret": "$MCP_OAUTH_CLIENT_SECRET",
-    "scope": "mcp.read"
-  },
-  "description": "企业统一 MCP 网关"
-}
-```
-
-#### 5.2.6 示例 F — 远程 `sse`（内网托管 MCP）
-
-```json
-"internal-search": {
-  "enabled": true,
-  "type": "sse",
-  "url": "https://mcp-internal.corp.example.com/sse",
-  "headers": {"X-Api-Key": "$INTERNAL_MCP_API_KEY"},
-  "description": "内网搜索 MCP"
-}
-```
-
-### 5.3 `command` / `args` 怎么填（stdio）
+### 5.4 `command` / `args` 怎么填（stdio）
 
 Gateway 执行逻辑等价于：
 
@@ -1133,16 +1078,16 @@ Gateway 默认 stdio 仅允许 `npx`、`uvx`；可用 `DEER_FLOW_MCP_STDIO_COMMA
 
 OAuth、`mcpInterceptors` 等见 [backend/docs/MCP_SERVER.md](../backend/docs/MCP_SERVER.md)。
 
-### 5.4 动手试：在本机启用 `everything-demo`（stdio）
+### 5.5 动手试：在本机启用 `everything-demo`（stdio）
 
-**1. 编辑 `extensions_config.json`**（示例 D），Gateway 机器需 **Node.js + npx**。
+**1. 编辑 `extensions_config.json`**（见 **§5.2** 中 `everything-demo` 块），Gateway 机器需 **Node.js + npx**。
 
 **2. 让 Gateway 读到新配置**
 
 | 方式 | 说明 |
 |------|------|
 | **重启 Gateway** | `make dev` / docker 重启后自动读文件 |
-| **admin `PUT /api/mcp/config`** | 热写入并 `reload_extensions_config`（见 **§5.7.2**） |
+| **admin `PUT /api/mcp/config`** | 热写入并 `reload_extensions_config`（见 **§5.8.2**） |
 | **`POST /api/mcp/cache/reset`** | 仅清 MCP **工具缓存**；**不会**重新读磁盘上的 `extensions_config.json` |
 
 改 JSON 文件后若只调 `cache/reset` 而 Gateway 未重启，admin `GET /api/mcp/config` 里可能仍看不到新 server。
@@ -1175,14 +1120,14 @@ curl -N -X POST "${GATEWAY}/api/runs/stream" \
 
 > 无效的 `mcpInterceptors`（如示例 `my_package.mcp.auth`）一般只打 warning，不阻止 MCP 加载；生产请改真实路径或 `"mcpInterceptors": []`。
 
-### 5.5 超时：tool_call_timeout
+### 5.6 超时：tool_call_timeout
 
 | 传输 | `tool_call_timeout` |
 |------|---------------------|
 | **`stdio`** | **生效**：单次 MCP tool call 上限（秒），如 `"tool_call_timeout": 60` |
 | **`sse` / `http`** | **不生效**（配置了会打 warning）；依赖传输层 / 远端服务超时 |
 
-### 5.6 路由提示 routing（可选）
+### 5.7 路由提示 routing（可选）
 
 **软引导**：在 system prompt 注入 `<mcp_routing_hints>`，帮助模型**优先**选用某 MCP 工具；**不会禁止**内置工具或其他 MCP。
 
@@ -1202,7 +1147,7 @@ curl -N -X POST "${GATEWAY}/api/runs/stream" \
 
 还可在 `tools.<原始工具名>.routing` 上为单个 MCP 工具覆盖上述字段（工具名用 MCP server 原始名，**不含** `{server}_` 前缀）。
 
-### 5.7 HTTP 管理接口（admin only）
+### 5.8 HTTP 管理接口（admin only）
 
 > **平台 Internal Token 调用 `/api/mcp/*` 会 403。** 下列接口供 **运维 / admin** 排查或热更新；日常推荐直接改 `extensions_config.json` + 重启。
 
@@ -1223,7 +1168,7 @@ CSRF="$(grep csrf_token "${ADMIN_COOKIE}" | awk '{print $NF}')"
 
 密码含 `!` 等 shell 特殊字符时，`-d` 建议用**单引号**包裹整段 `username=...&password=...`（zsh/bash）。
 
-#### 5.7.1 查看配置 — `GET /api/mcp/config`
+#### 5.8.1 查看配置 — `GET /api/mcp/config`
 
 返回当前 MCP 配置；**密钥字段脱敏**（显示 `***`）。
 
@@ -1233,7 +1178,7 @@ curl -sS "${GATEWAY}/api/mcp/config" \
   -b "${ADMIN_COOKIE}"
 ```
 
-#### 5.7.2 更新配置 — `PUT /api/mcp/config`
+#### 5.8.2 更新配置 — `PUT /api/mcp/config`
 
 **请求体**键名为 **`mcp_servers`**（snake_case），写入 `extensions_config.json` 并热重载。已有 `$VAR` 占位符会被保留。
 
@@ -1257,7 +1202,7 @@ curl -sS -X PUT "${GATEWAY}/api/mcp/config" \
 
 > **注意**：`PUT` 会**替换**请求体中的整个 `mcp_servers` 对象。更新前务必先 **`GET /api/mcp/config`**，在完整列表上修改后再提交，避免误删其他 server。
 
-#### 5.7.3 重置工具缓存 — `POST /api/mcp/cache/reset`
+#### 5.8.3 重置工具缓存 — `POST /api/mcp/cache/reset`
 
 清空**当前 Gateway 进程**内 MCP 工具缓存与会话池；下次 run 重新连接 MCP。
 
@@ -1269,7 +1214,7 @@ curl -sS -X POST "${GATEWAY}/api/mcp/cache/reset" \
 
 多 Gateway 实例时，每个实例需各自 reset，或统一重启。
 
-### 5.8 平台如何使用 MCP
+### 5.9 平台如何使用 MCP
 
 平台**无需**单独「调用 MCP API」：
 
@@ -1279,7 +1224,7 @@ curl -sS -X POST "${GATEWAY}/api/mcp/cache/reset" \
 
 若需**硬限制**某 Agent 只能用部分工具，用 **§6** 的 `tool_groups` / Agent 策略，而非 MCP routing。
 
-### 5.9 接入 checklist（运维）
+### 5.10 接入 checklist（运维）
 
 1. `cp extensions_config.example.json extensions_config.json`
 2. 在 `mcpServers` 添加 server 块，`"enabled": true`
@@ -1287,7 +1232,7 @@ curl -sS -X POST "${GATEWAY}/api/mcp/cache/reset" \
 4. 重启 Gateway，或 admin `POST /api/mcp/cache/reset`
 5. 平台发起对话，在 SSE / Langfuse trace 中确认 Agent 调用了 `{server}_*` 工具
 
-### 5.10 注意事项
+### 5.11 注意事项
 
 - **不要**为 DeerFlow workspace 再挂 MCP **filesystem** 服务器 — 与内置 `read_file` / `write_file` 路径语义冲突（见 [backend/docs/MCP_SERVER.md](../backend/docs/MCP_SERVER.md)）
 - MCP 与 Skill 是**独立**扩展：`extensions_config.json` 里 `mcpServers` 与 `skills` 并列，互不影响
