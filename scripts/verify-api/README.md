@@ -161,3 +161,81 @@ bash scripts/verify-api/verify.sh api_verify.py integration-stream
 - `run_events.backend`: `db`
 
 `start-gateway.sh` 会强制 `DEER_FLOW_CONFIG_PATH` 指向项目根 `config.yaml`。
+
+---
+
+## `.skill` 打包 / 上传 / 安装验证
+
+示例 Skill：`scripts/verify-api/invoice-test-check/`（用于跑通 install API）。
+
+### 1. 打包（业务方可直接跑，无额外依赖）
+
+```bash
+python3 scripts/verify-api/package_skill.py scripts/verify-api/invoice-test-check ./
+# 生成 ./invoice-test-check.skill
+```
+
+### 2. 平台 zhangsan 上传（Internal Token）
+
+```bash
+export GATEWAY=http://127.0.0.1:8001
+export INTERNAL_TOKEN=X-DeerFlow-Internal-Token-valid
+export OWNER=zhangsan
+
+# 建 Thread
+THREAD_ID=$(curl -sS -X POST "${GATEWAY}/api/threads" \
+  -H "Content-Type: application/json" \
+  -H "X-DeerFlow-Internal-Token: ${INTERNAL_TOKEN}" \
+  -H "X-DeerFlow-Owner-User-Id: ${OWNER}" \
+  -d '{}' | python3 -c "import sys,json; print(json.load(sys.stdin)['thread_id'])")
+
+# 上传
+curl -sS -X POST "${GATEWAY}/api/threads/${THREAD_ID}/uploads" \
+  -H "X-DeerFlow-Internal-Token: ${INTERNAL_TOKEN}" \
+  -H "X-DeerFlow-Owner-User-Id: ${OWNER}" \
+  -F "files=@./invoice-test-check.skill;type=application/octet-stream"
+```
+
+记下响应里的 `virtual_path`（如 `/mnt/user-data/uploads/invoice-test-check.skill`）和 `thread_id`。
+
+### 3. admin 安装（Cookie + CSRF）
+
+```bash
+# 首次：初始化 admin（仅需一次）
+bash scripts/verify-api/verify.sh api_verify.py init-admin
+
+# 登录拿 Cookie（或用手动 curl form 登录，见 test-skill-install.sh）
+bash scripts/verify-api/verify.sh api_verify.py login   # 需先把 CONFIG email/password 改成 admin
+
+CSRF=$(grep csrf_token .deer-flow/verify-api/user_a.cookies | awk '{print $NF}')
+
+curl -sS -X POST "${GATEWAY}/api/skills/install" \
+  -H "Content-Type: application/json" \
+  -H "X-CSRF-Token: ${CSRF}" \
+  -b .deer-flow/verify-api/admin.cookies \
+  -d "{\"thread_id\":\"${THREAD_ID}\",\"path\":\"/mnt/user-data/uploads/invoice-test-check.skill\"}"
+```
+
+**重要限制（当前 Gateway 行为）：**
+
+| 场景 | 结果 |
+|------|------|
+| zhangsan 上传 + admin 安装（跨用户 Thread） | 通常 **404**（install 按 admin 的 user_id 找 Thread 目录，找不到 zhangsan 下的 uploads） |
+| admin 自建 Thread + admin 上传 + admin 安装 | **200**，Skill 进 **admin 用户目录** |
+| 要给 zhangsan 装 Skill | 运维 `unzip` 到 `.deer-flow/users/zhangsan/skills/custom/`（见 `docs/DEERFLOW_USAGE_GUIDE_zh.md` §4.6.4） |
+
+### 一键脚本
+
+```bash
+# zhangsan 上传 + admin 跨用户 install（预期 install 404，用于验证权限/路径行为）
+bash scripts/verify-api/test-skill-install.sh
+
+# 只打包 + zhangsan 上传
+bash scripts/verify-api/test-skill-install.sh --skip-install
+
+# admin 同用户完整 install API（预期 200）
+bash scripts/verify-api/test-skill-install.sh --admin-self
+```
+
+状态文件：`.deer-flow/verify-api/skill-install.state.json`（含 `thread_id`、`virtual_path`）。
+
