@@ -13,7 +13,7 @@ cd "$ROOT"
 INTERNAL_TOKEN="${DEER_FLOW_INTERNAL_AUTH_TOKEN:-X-DeerFlow-Internal-Token-valid}"
 OWNER="${DEER_FLOW_OWNER_USER_ID:-zhangsan}"
 GATEWAY="${DEER_FLOW_GATEWAY_URL:-http://127.0.0.1:8001}"
-THREAD_ID="${THREAD_ID:-hitl-api-test-001}"
+THREAD_ID="${THREAD_ID:-hitl-api-test-007}"
 STEP1_OUT="${TMPDIR:-/tmp}/deerflow-hitl-step1.sse"
 STEP2_JSON="${TMPDIR:-/tmp}/deerflow-hitl-step2.json"
 
@@ -24,9 +24,9 @@ auth_headers=(
 
 extract_tool_call_id() {
   python3 - "$1" <<'PY'
-import json, re, sys
+import json, sys
+
 text = open(sys.argv[1], encoding="utf-8").read()
-# Find last ask_clarification tool_call id in SSE data lines
 last_id = None
 for line in text.splitlines():
     if not line.startswith("data: "):
@@ -38,14 +38,20 @@ for line in text.splitlines():
         obj = json.loads(payload)
     except json.JSONDecodeError:
         continue
-    for msg in obj.get("messages") or []:
-        if msg.get("type") != "ai":
-            continue
-        for tc in msg.get("tool_calls") or []:
-            if tc.get("name") == "ask_clarification" and tc.get("id"):
-                last_id = tc["id"]
-for msg_block in re.findall(r'"name"\s*:\s*"ask_clarification"[^}]*"id"\s*:\s*"([^"]+)"', text):
-    last_id = msg_block
+    for msg in reversed(obj.get("messages") or []):
+        if msg.get("type") == "tool" and msg.get("name") == "ask_clarification":
+            hi = (msg.get("artifact") or {}).get("human_input") or {}
+            if hi.get("tool_call_id"):
+                last_id = hi["tool_call_id"]
+                break
+            if msg.get("tool_call_id"):
+                last_id = msg["tool_call_id"]
+                break
+        if msg.get("type") == "ai":
+            for tc in msg.get("tool_calls") or []:
+                if tc.get("name") == "ask_clarification" and tc.get("id"):
+                    last_id = tc["id"]
+                    break
 print(last_id or "")
 PY
 }
@@ -60,7 +66,7 @@ step2_body() {
     "messages": [
       {
         "role": "human",
-        "content": "For your clarification about deployment environment, my answer is: 测试环境",
+        "content": "测试环境",
         "additional_kwargs": {
           "hide_from_ui": true,
           "human_input_response": {
@@ -68,7 +74,8 @@ step2_body() {
             "kind": "human_input_response",
             "source": "ask_clarification",
             "request_id": "${request_id}",
-            "response_kind": "text",
+            "response_kind": "option",
+            "option_id": "option-2",
             "value": "测试环境"
           }
         }
