@@ -1,0 +1,27 @@
+{
+    "assistant_id": "lead_agent",
+    "input": {
+      "messages": [
+        {
+          "role": "human",
+          "content": "请使用 task 工具并行启动 2 个 general-purpose 子 agent，互不依赖：\n1) 用 150 字解释什么是 Server-Sent Events；\n2) 用 150 字解释什么是 WebSocket。\n每个子任务单独执行，完成后由你汇总对比。"
+        }
+      ]
+    },
+    "context": {
+      "subagent_enabled": true,
+      "is_plan_mode": true,
+      "max_concurrent_subagents": 2,
+      "max_total_subagents": 2,
+      "model_name": "chatling-plus"
+    },
+    "config": {
+      "configurable": {
+        "thread_id": "subagent-api-test-001"
+      }
+    },
+    "metadata": {
+      "source": "subagent-api-test"
+    },
+    "on_disconnect": "continue"
+  }

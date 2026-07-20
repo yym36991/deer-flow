@@ -1,0 +1,26 @@
+{
+  "assistant_id": "lead_agent",
+  "input": {
+    "messages": [
+      {
+        "role": "human",
+        "content": "我要把服务部署到服务器。在开始任何操作之前，如果你不确定目标环境，必须先调用 ask_clarification 向我确认：开发环境、测试环境还是生产环境。不要猜测。"
+      }
+    ]
+  },
+  "context": {
+    "subagent_enabled": false,
+    "is_plan_mode": false,
+    "thinking_enabled": false,
+    "model_name": "chatling-plus"
+  },
+  "config": {
+    "configurable": {
+      "thread_id": "hitl-api-test-002"
+    }
+  },
+  "metadata": {
+    "source": "hitl-api-test"
+  },
+  "on_disconnect": "continue"
+}

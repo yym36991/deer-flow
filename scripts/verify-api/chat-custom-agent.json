@@ -1,0 +1,26 @@
+{
+  "assistant_id": "zhangsan-agent",
+  "input": {
+    "messages": [
+      {
+        "role": "human",
+        "content": "用三句话介绍你自己，并说明你和默认 lead_agent 有什么不同。"
+      }
+    ]
+  },
+  "context": {
+    "subagent_enabled": false,
+    "is_plan_mode": false,
+    "thinking_enabled": false,
+    "model_name": "chatling-plus"
+  },
+  "config": {
+    "configurable": {
+      "thread_id": "zhangsan-agent-test-001"
+    }
+  },
+  "metadata": {
+    "source": "custom-agent-api-test"
+  },
+  "on_disconnect": "continue"
+}
