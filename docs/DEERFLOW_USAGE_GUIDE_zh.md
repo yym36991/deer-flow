@@ -640,11 +640,213 @@ curl -i -N -X POST "${GATEWAY}/api/runs/stream" \
 
 复制完成后重启 Gateway（或联系运维刷新 Skill 缓存）。适合批量迁移，非 API 路径。
 
-**分发 `.skill` 压缩包：** 平台可先 `POST .../uploads` 上传；安装 API 需 admin 角色，本部署建议运维解压到上述用户目录。
+---
+
+### 4.6 分发 `.skill` 压缩包（平台上传 + 运维安装）
+
+`.skill` 文件本质是 **ZIP 压缩包**，根目录下应有一个 Skill 文件夹，且包含带 YAML frontmatter 的 `SKILL.md`。安装后 Skill 写入 **Owner 的 custom 目录**，对该 Owner 后续所有 Thread 生效。
+
+**本部署权限分工：**
+
+| 步骤 | 谁 | API / 操作 | Internal Token + Owner |
+|------|-----|------------|------------------------|
+| 上传 `.skill` 到 Thread | **平台** | `POST /api/threads/{id}/uploads` | ✅ 可用 |
+| 从上传文件安装到用户 | **运维（admin）** | `POST /api/skills/install` | ❌ 403（需 admin 角色） |
+| 手动解压到用户目录 | **运维** | 文件系统 | 不经过 API |
+
+> 实测（2026-07-20）：平台上传成功；同 Owner 调 `POST /api/skills/install` 返回 `403 Admin privileges required`；运维将 ZIP 解压到 `.deer-flow/users/zhangsan/skills/custom/` 后，`GET /api/skills/custom` 立即可见，**无需重启 Gateway**。
+
+#### 4.6.1 本地准备 Skill 包
+
+**目录结构示例：**
+
+```text
+invoice-check/
+├── SKILL.md          # 必需，含 YAML frontmatter
+└── references/       # 可选
+    └── rules.md
+```
+
+`SKILL.md` 最小示例：
+
+```yaml
+---
+name: invoice-check
+description: 审查发票数据是否符合公司财务规范。用户要求校验发票时使用。
+---
+
+# Invoice Check Skill
+
+（正文：步骤与约束）
+```
+
+**打成 `.skill`（任选其一）：**
+
+```bash
+# 方式 A：仓库自带打包脚本（会先校验 SKILL.md）
+cd skills/public/skill-creator/scripts
+python3 package_skill.py /path/to/invoice-check /tmp
+
+# 方式 B：手动 zip（根目录保留 skill 文件夹名）
+cd /path/to/parent
+zip -r invoice-check.skill invoice-check/
+```
+
+#### 4.6.2 平台：创建 Thread 并上传
+
+```bash
+export GATEWAY="http://127.0.0.1:8001"
+export INTERNAL_TOKEN="X-DeerFlow-Internal-Token-valid"
+export OWNER="zhangsan"
+
+# Step 1 — 创建 Thread（也可复用已有 thread_id）
+THREAD_ID=$(curl -sS -X POST "${GATEWAY}/api/threads" \
+  -H "Content-Type: application/json" \
+  -H "X-DeerFlow-Internal-Token: ${INTERNAL_TOKEN}" \
+  -H "X-DeerFlow-Owner-User-Id: ${OWNER}" \
+  -d '{"metadata":{"label":"skill-pack-test"}}' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['thread_id'])")
+
+# Step 2 — 上传 .skill（multipart 字段名必须是 files）
+curl -sS -X POST "${GATEWAY}/api/threads/${THREAD_ID}/uploads" \
+  -H "X-DeerFlow-Internal-Token: ${INTERNAL_TOKEN}" \
+  -H "X-DeerFlow-Owner-User-Id: ${OWNER}" \
+  -F "files=@/tmp/invoice-check.skill;type=application/octet-stream"
+```
+
+**上传成功响应要点：**
+
+| 字段 | 说明 |
+|------|------|
+| `files[0].path` | 宿主机绝对路径，如 `.deer-flow/users/zhangsan/threads/{thread_id}/user-data/uploads/invoice-check.skill` |
+| `files[0].virtual_path` | 安装 API 用的虚拟路径，如 **`/mnt/user-data/uploads/invoice-check.skill`** |
+| `files[0].artifact_url` | 可下载该文件的 Gateway URL |
+
+**确认文件在 Thread 中：**
+
+```bash
+curl -sS "${GATEWAY}/api/threads/${THREAD_ID}/uploads/list" \
+  -H "X-DeerFlow-Internal-Token: ${INTERNAL_TOKEN}" \
+  -H "X-DeerFlow-Owner-User-Id: ${OWNER}"
+```
+
+> 上传到 **uploads** 目录；`path` 填响应里的 `virtual_path`（`/mnt/user-data/uploads/...`），不要写成 `outputs`。
+
+#### 4.6.3 运维：通过 Install API 安装（需 admin）
+
+Gateway 实现为 **JSON 请求体**（非 multipart 直传文件）：
+
+```http
+POST /api/skills/install
+Content-Type: application/json
+X-DeerFlow-Owner-User-Id: zhangsan   # 安装到该 Owner 的 custom 目录
+```
+
+**请求体：**
+
+```json
+{
+  "thread_id": "149239e6-a530-4434-aff2-5c732bcc3057",
+  "path": "/mnt/user-data/uploads/invoice-check.skill"
+}
+```
+
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| `thread_id` | 是 | 上传时使用的 Thread ID |
+| `path` | 是 | 上传响应中的 `virtual_path` |
+
+**成功响应（201/200）：**
+
+```json
+{
+  "success": true,
+  "skill_name": "invoice-check",
+  "message": "Skill 'invoice-check' installed successfully"
+}
+```
+
+落盘位置：`.deer-flow/users/zhangsan/skills/custom/invoice-check/`。
+
+**平台 Internal Token 调用会失败（实测）：**
+
+```json
+{"detail":"Admin privileges required to manage skills."}
+```
+
+HTTP **403**。本部署无浏览器 admin 时，请用下方 4.6.4 运维落盘。
+
+**常见错误：**
+
+| HTTP | 原因 |
+|------|------|
+| 403 | 非 admin 调用 install |
+| 404 | `thread_id` 或 `path` 错误；Owner 与 Thread 不一致 |
+| 409 | 同名 custom Skill 已存在 |
+| 400 | ZIP 内无合法 `SKILL.md` frontmatter；或 SkillScan 安全扫描拒绝 |
+
+#### 4.6.4 运维：手动解压（本部署推荐）
+
+平台完成上传后，运维在 Gateway 宿主机执行：
+
+```bash
+# 方式 A：从 Thread uploads 目录取已上传的包
+THREAD_ID="149239e6-a530-4434-aff2-5c732bcc3057"
+OWNER="zhangsan"
+ARCHIVE=".deer-flow/users/${OWNER}/threads/${THREAD_ID}/user-data/uploads/invoice-check.skill"
+TARGET=".deer-flow/users/${OWNER}/skills/custom"
+
+mkdir -p "${TARGET}"
+unzip -o "${ARCHIVE}" -d "${TARGET}"
+
+# 方式 B：运维本地持有 .skill，直接解压到用户目录
+unzip -o /tmp/invoice-check.skill -d .deer-flow/users/zhangsan/skills/custom/
+```
+
+解压后目录应为：
+
+```text
+.deer-flow/users/zhangsan/skills/custom/invoice-check/SKILL.md
+```
+
+**平台验证：**
+
+```bash
+curl -sS "${GATEWAY}/api/skills/custom" \
+  -H "X-DeerFlow-Internal-Token: ${INTERNAL_TOKEN}" \
+  -H "X-DeerFlow-Owner-User-Id: zhangsan"
+```
+
+响应中应出现 `"name":"invoice-check"`，`"category":"custom"`，`"enabled":true`。
+
+#### 4.6.5 端到端流程图
+
+```
+运维/CI 打包 invoice-check.skill
+        │
+        ▼
+平台 POST /api/threads          （Owner=zhangsan）
+        │
+        ▼
+平台 POST .../uploads           （multipart files=@xxx.skill）
+        │  返回 virtual_path=/mnt/user-data/uploads/xxx.skill
+        ▼
+   ┌────┴────┐
+   │         │
+有 admin    无 admin（本部署）
+   │         │
+   ▼         ▼
+POST        运维 unzip 到
+/api/skills/install   .deer-flow/users/zhangsan/skills/custom/
+   │         │
+   └────┬────┘
+        ▼
+GET /api/skills/custom  →  zhangsan 后续对话自动可用
+```
 
 ---
 
-### 4.6 HTTP 接口（平台可用部分）
+### 4.7 HTTP 接口（平台可用部分）
 
 #### `GET /api/skills`
 
@@ -666,23 +868,24 @@ curl -i -N -X POST "${GATEWAY}/api/runs/stream" \
 | 接口 | Gateway 要求 | 本部署替代方式 |
 |------|--------------|----------------|
 | `PUT /api/skills/{name}` | admin | 运维改 `extensions_config.json` 或 `_skill_states.json` |
-| `POST /api/skills/install` | admin | 运维落盘到用户 custom 目录 |
+| `POST /api/skills/install` | admin | 见 **§4.6.3**（Install API）；无 admin 时用 **§4.6.4**（运维解压） |
 | `POST /api/skills/reload` | admin | 重启 Gateway |
 | `PUT/DELETE /api/skills/custom/*` | admin | 对话让 Agent `skill_manage`，或运维改文件 |
 
 ---
 
-### 4.7 场景速查
+### 4.8 场景速查
 
 | 场景 | 谁 | 怎么做 |
 |------|-----|--------|
 | 全站开放 deep-research | 运维 | `extensions_config.json` + 重启 |
 | 查 zhangsan 有哪些 Skill | 平台 | `GET /api/skills`，Owner=zhangsan |
 | zhangsan 对话里用 Skill | 平台 | `POST /api/runs/stream`，Owner=zhangsan |
-| zhangsan 自建 order-review | 平台 | Owner=zhangsan 发对话创建；需 `skill_evolution.enabled` |
+| zhangsan 自建 order-review | 平台 | Owner=zhangsan 发对话 + `skill_manage`；需 `skill_evolution.enabled` |
+| 分发 `.skill` 给 zhangsan | 平台 + 运维 | 平台 `POST .../uploads`；运维 unzip 或 admin 调 `POST /api/skills/install` |
 | 限制 Agent 只用某几个 Skill | 平台 | `POST /api/agents`，`skills: [...]` |
 
-### 4.8 注意事项
+### 4.9 注意事项
 
 1. public Skill 未在 `extensions_config.json` 启用时，**任何 Owner** 的对话里都加载不到
 2. custom Skill 默认创建即启用；若要关闭，运维编辑 `.deer-flow/users/{Owner}/skills/_skill_states.json`
